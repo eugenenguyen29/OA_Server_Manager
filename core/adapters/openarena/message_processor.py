@@ -5,6 +5,7 @@ import re
 from typing import Callable, Dict, List, Optional
 
 from core.adapters.base import BaseMessageProcessor, MessageType, ParsedMessage
+from core.adapters.openarena.status_parser import OAStatusParser
 
 
 class OAMessageProcessor(BaseMessageProcessor):
@@ -12,7 +13,8 @@ class OAMessageProcessor(BaseMessageProcessor):
     OpenArena-specific message parsing.
 
     Parses server console output using regex patterns specific to
-    OpenArena/Quake III Arena.
+    OpenArena/Quake III Arena. Uses OAStatusParser for status output
+    parsing with encapsulated state management.
     """
 
     def __init__(self, send_command_callback: Optional[Callable[[str], None]] = None):
@@ -33,13 +35,11 @@ class OAMessageProcessor(BaseMessageProcessor):
             MessageType.SERVER_SHUTDOWN: re.compile(r"^ShutdownGame:\s*(.*)$"),
         }
 
-        # Status parsing state
-        self._parsing_status = False
-        self._status_lines: List[str] = []
-        self._status_line_count = 0
-        self._status_header_detected = False
+        # Status parser (replaces 6 legacy state variables)
+        self._status_parser = OAStatusParser()
+
+        # Client count tracking (used for logging only)
         self._status_client_count = 0
-        self._seen_separator = False
 
         # Event tracking for shutdown type detection
         self._recent_fraglimit_hit = False
@@ -62,6 +62,10 @@ class OAMessageProcessor(BaseMessageProcessor):
         raw_message = raw_message.strip()
 
         if not raw_message:
+            # Empty line during status parsing completes it
+            if self._status_parser.is_parsing:
+                self.logger.info("Empty line detected, ending status parsing")
+                return self._complete_status_parsing()
             return ParsedMessage(MessageType.UNKNOWN, raw_message)
 
         # Check client connecting
@@ -94,19 +98,15 @@ class OAMessageProcessor(BaseMessageProcessor):
         if match:
             return self._handle_shutdown_game(raw_message, match)
 
-        # Check for status header
-        if "num score ping name" in raw_message and "address" in raw_message:
+        # Check for status header using StatusParser
+        if self._status_parser.is_status_header(raw_message):
             self.logger.debug("Detected status header, starting status parsing")
-            self._parsing_status = True
-            self._status_lines = []
-            self._status_line_count = 0
-            self._status_header_detected = True
+            self._status_parser.start_parsing()
             self._status_client_count = 0
-            self._seen_separator = False
             return self._handle_status_line(raw_message)
 
         # Continue status parsing if in progress
-        if self._parsing_status:
+        if self._status_parser.is_parsing:
             return self._handle_status_line(raw_message)
 
         return ParsedMessage(MessageType.UNKNOWN, raw_message)
@@ -227,22 +227,17 @@ class OAMessageProcessor(BaseMessageProcessor):
         )
 
     def _handle_status_line(self, raw_message: str) -> ParsedMessage:
-        """Handle server status output lines."""
-        self._status_line_count += 1
+        """Handle server status output lines using StatusParser."""
+        # Add line to status parser
+        self._status_parser.add_line(raw_message)
 
-        self.logger.debug(f"[STATUS] Line {self._status_line_count}: '{raw_message}'")
-
-        # Empty line ends status parsing
-        if len(raw_message) == 0:
-            self.logger.info("Empty line detected, ending status parsing")
-            return self._complete_status_parsing()
-
-        self._status_lines.append(raw_message)
+        line_count = self._status_parser.line_count
+        self.logger.debug(f"[STATUS] Line {line_count}: '{raw_message}'")
 
         # Separator line
-        if raw_message.startswith("---"):
+        if self._status_parser.is_separator(raw_message):
             self.logger.debug("Found separator line, client data starts next")
-            self._seen_separator = True
+            self._status_parser.mark_separator_seen()
             return ParsedMessage(MessageType.STATUS_UPDATE, raw_message)
 
         # Map line
@@ -251,13 +246,13 @@ class OAMessageProcessor(BaseMessageProcessor):
             return ParsedMessage(MessageType.STATUS_UPDATE, raw_message)
 
         # Header line
-        if raw_message.startswith("num score ping"):
+        if self._status_parser.is_status_header(raw_message):
             return ParsedMessage(MessageType.STATUS_UPDATE, raw_message)
 
-        # Client data lines
-        if self._seen_separator:
+        # Client data lines (after separator)
+        if self._status_parser.seen_separator:
             if re.match(r"^\s*\d+\s+", raw_message):
-                client_data = self._extract_client_from_status_line(raw_message)
+                client_data = self._status_parser.parse_client_line(raw_message)
                 if client_data:
                     self._status_client_count += 1
                     self.logger.info(
@@ -269,7 +264,7 @@ class OAMessageProcessor(BaseMessageProcessor):
                         raw_message,
                         {
                             "client_data": client_data,
-                            "line_number": self._status_line_count,
+                            "line_number": line_count,
                         },
                     )
             else:
@@ -280,69 +275,18 @@ class OAMessageProcessor(BaseMessageProcessor):
 
         return ParsedMessage(MessageType.STATUS_UPDATE, raw_message)
 
-    def _extract_client_from_status_line(self, line: str) -> Optional[Dict]:
-        """Extract client data from a server status line."""
-        try:
-            parts = line.split()
-            self.logger.debug(f"[STATUS] Line parts: {parts}")
-
-            if len(parts) < 6:
-                self.logger.debug(f"Line has insufficient parts: {len(parts)}")
-                return None
-
-            # Status line format:
-            # num score ping name lastmsg address qport rate
-            #  0    1   2    3      4    5        6    7
-            try:
-                client_id = int(parts[0])
-                score = int(parts[1])
-                ping = int(parts[2])
-                name = parts[3]
-                lastmsg = int(parts[4])
-                address = parts[5]
-                qport = int(parts[6]) if parts[6] != "0" else 0
-                rate = int(parts[7])
-            except (ValueError, IndexError) as e:
-                self.logger.debug(f"Error parsing line parts: {e}")
-                return None
-
-            if address == "bot":
-                client_type = "BOT"
-                ip_address = "bot"
-            else:
-                client_type = "HUMAN"
-                ip_address = address.split(":")[0] if ":" in address else address
-                if not self._is_valid_ip(ip_address):
-                    self.logger.warning(f"Invalid IP format: {ip_address}")
-                    return None
-
-            return {
-                "client_id": client_id,
-                "score": score,
-                "ping": ping,
-                "name": name,
-                "lastmsg": lastmsg,
-                "ip": ip_address,
-                "qport": qport,
-                "rate": rate,
-                "type": client_type,
-            }
-
-        except Exception as e:
-            self.logger.error(f"Error extracting client from line '{line}': {e}")
-            return None
-
     def _extract_client_data_from_status(self) -> List[Dict]:
         """Extract all client data from collected status lines."""
         client_data_list = []
+        lines = self._status_parser.lines
 
-        self.logger.info(f"Processing {len(self._status_lines)} status lines")
+        self.logger.info(f"Processing {len(lines)} status lines")
 
-        for i, line in enumerate(self._status_lines, 1):
+        for i, line in enumerate(lines, 1):
             if i <= 3:  # Skip map, headers, and separator lines
                 continue
 
-            client_data = self._extract_client_from_status_line(line)
+            client_data = self._status_parser.parse_client_line(line)
             if client_data:
                 existing = next(
                     (
@@ -370,8 +314,10 @@ class OAMessageProcessor(BaseMessageProcessor):
         self.logger.info(
             f"Status parsing complete. Processed {self._status_client_count} clients"
         )
-        self._parsing_status = False
         client_data = self._extract_client_data_from_status()
+
+        # Complete parsing (resets state)
+        self._status_parser.complete()
 
         return ParsedMessage(
             MessageType.STATUS_UPDATE,
@@ -379,15 +325,15 @@ class OAMessageProcessor(BaseMessageProcessor):
             {"client_data": client_data, "status_complete": True},
         )
 
-    def _complete_status_parsing_and_reprocess(
-        self, raw_message: str
-    ) -> ParsedMessage:
+    def _complete_status_parsing_and_reprocess(self, raw_message: str) -> ParsedMessage:
         """Complete status parsing and return the non-status message."""
         self.logger.info(
             f"Status parsing complete. Processed {self._status_client_count} clients"
         )
-        self._parsing_status = False
         client_data = self._extract_client_data_from_status()
+
+        # Complete parsing (resets state)
+        self._status_parser.complete()
 
         if client_data:
             return ParsedMessage(
@@ -397,11 +343,3 @@ class OAMessageProcessor(BaseMessageProcessor):
             )
         else:
             return ParsedMessage(MessageType.UNKNOWN, raw_message)
-
-    def _is_valid_ip(self, ip: str) -> bool:
-        """Basic IP address validation."""
-        try:
-            parts = ip.split(".")
-            return len(parts) == 4 and all(0 <= int(part) <= 255 for part in parts)
-        except (ValueError, AttributeError):
-            return False

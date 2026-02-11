@@ -7,6 +7,7 @@ from tui_main import AdminApp
 
 server = None
 
+
 class MockServer:
     def __init__(self):
         self.output_handler = None
@@ -52,11 +53,21 @@ class MockServer:
         if self.output_handler:
             self.output_handler(f"Kicking client {client_id}")
 
+
 class MockNetworkManager:
     def __init__(self):
         self.client_type_map = {0: "HUMAN", 1: "HUMAN", 2: "HUMAN", 3: "BOT"}
-        self.client_name_map = {0: "Player1", 1: "Player2", 2: "Player3", 3: "Bot_Anarki"}
-        self.client_ip_map = {0: "192.168.1.100", 1: "192.168.1.101", 2: "192.168.1.102"}
+        self.client_name_map = {
+            0: "Player1",
+            1: "Player2",
+            2: "Player3",
+            3: "Bot_Anarki",
+        }
+        self.client_ip_map = {
+            0: "192.168.1.100",
+            1: "192.168.1.101",
+            2: "192.168.1.102",
+        }
 
     def get_client_count(self):
         return len(self.client_type_map)
@@ -67,15 +78,19 @@ class MockNetworkManager:
     def get_bot_count(self):
         return sum(1 for t in self.client_type_map.values() if t == "BOT")
 
+
 class MockGameStateManager:
     def get_current_state(self):
         class State:
             name = "WARMUP"
+
         return State()
+
 
 class MockOBSManager:
     def is_client_connected(self, ip):
         return ip == "192.168.1.100"
+
 
 class MockTUIApp(AdminApp):
     CSS_PATH = "../tui_main.tcss"
@@ -94,9 +109,11 @@ class MockTUIApp(AdminApp):
         server_thread = threading.Thread(target=server.run_server_loop, daemon=True)
         server_thread.start()
 
+
 def main():
     app = MockTUIApp()
     app.run()
+
 
 if __name__ == "__main__":
     main()

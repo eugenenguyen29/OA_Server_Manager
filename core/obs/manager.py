@@ -309,4 +309,3 @@ class OBSManager:
             Number of connected clients
         """
         return len(self.obs_clients)
-

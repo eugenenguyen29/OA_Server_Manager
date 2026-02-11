@@ -109,6 +109,20 @@ class GameStateManager:
 
         return result
 
+    def transition_to(self, new_state: GameState) -> None:
+        """Transition to a new game state with logging.
+
+        Args:
+            new_state: The GameState to transition to.
+        """
+        old_state = self.current_state
+        self.current_state = new_state
+        self.logger.info(f"State transition: {old_state.name} -> {new_state.name}")
+
+    def reset_to_waiting(self) -> None:
+        """Reset game state to WAITING."""
+        self.transition_to(GameState.WAITING)
+
     def get_current_state(self) -> GameState:
         """Get the current game state."""
         return self.current_state
@@ -148,4 +162,3 @@ class GameStateManager:
             "total": len(human_ips),
             "all_connected": all_connected,
         }
-

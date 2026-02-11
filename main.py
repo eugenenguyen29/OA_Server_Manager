@@ -110,9 +110,11 @@ def run_async_loop():
 
     def exception_handler(loop, context):
         """Handle unhandled exceptions in the async loop."""
-        exception = context.get('exception')
+        exception = context.get("exception")
         if exception:
-            logger.error(f"Unhandled exception in async loop: {exception}", exc_info=True)
+            logger.error(
+                f"Unhandled exception in async loop: {exception}", exc_info=True
+            )
         else:
             logger.error(f"Async loop error: {context['message']}")
 
@@ -126,6 +128,7 @@ def run_async_loop():
     finally:
         logger.info("Async event loop closing")
         async_loop.close()
+
 
 def run_server_thread():
     """Run server in background thread."""

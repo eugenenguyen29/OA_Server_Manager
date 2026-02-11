@@ -51,3 +51,9 @@ dota2_poll_interval = float(os.getenv("DOTA2_POLL_INTERVAL", 5.0))
 dota2_gamemode = int(os.getenv("DOTA2_GAMEMODE", 1))  # 1=All Pick
 dota2_cheats = get_bool_env("DOTA2_CHEATS", False)
 
+# AMP (CubeCoders) API Settings
+amp_base_url = os.getenv("AMP_BASE_URL", "http://localhost:8080")
+amp_username = os.getenv("AMP_USERNAME", "")
+amp_password = os.getenv("AMP_PASSWORD", "")
+amp_instance_id = os.getenv("AMP_INSTANCE_ID", "")  # Optional for multi-instance
+amp_poll_interval = float(os.getenv("AMP_POLL_INTERVAL", 2.0))

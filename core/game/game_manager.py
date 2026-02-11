@@ -161,4 +161,3 @@ class GameManager:
         except Exception as e:
             self.logger.error(f"Error restarting map: {e}")
             return False
-

@@ -3,16 +3,21 @@ import logging
 import subprocess
 import threading
 import time
+import warnings
 from subprocess import PIPE, Popen
 from typing import Optional
 
 import core.utils.settings as settings
+from core.adapters.base import MessageType
+from core.adapters.openarena.message_processor import OAMessageProcessor
 from core.game.game_manager import GameManager
 from core.game.state_manager import GameStateManager
-from core.messaging.message_processor import MessageProcessor, MessageType
 from core.network.network_manager import NetworkManager
 from core.obs.connection_manager import OBSConnectionManager
-from core.server.shutdown_strategies import MatchShutdownStrategy, WarmupShutdownStrategy
+from core.server.shutdown_strategies import (
+    MatchShutdownStrategy,
+    WarmupShutdownStrategy,
+)
 from core.utils.display_utils import DisplayUtils
 
 
@@ -27,7 +32,19 @@ class Server:
     """
 
     def __init__(self):
-        """Initialize server with all specialized managers."""
+        """Initialize server with all specialized managers.
+
+        .. deprecated::
+            Use ``OAGameAdapter`` or ``AMPGameAdapter`` via the adapter
+            registry instead.  The Server class is retained only for the
+            legacy ``main.py`` CLI entry-point.
+        """
+        warnings.warn(
+            "Server class is deprecated. Use GameAdapter implementations "
+            "(OAGameAdapter / AMPGameAdapter) via the adapter registry instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.logger = logging.getLogger(__name__)
         self.nplayers_threshold = settings.nplayers_threshold
         self._output_handler = None
@@ -43,7 +60,7 @@ class Server:
         )
         self.game_manager = GameManager(send_command_callback=self.send_command)
         self.game_state_manager = GameStateManager(self.send_command)
-        self.message_processor = MessageProcessor(self.send_command)
+        self.message_processor = OAMessageProcessor(self.send_command)
         self.display_utils = DisplayUtils()
 
         self.obs_connection_manager = OBSConnectionManager(
@@ -59,14 +76,13 @@ class Server:
         }
 
         self.message_handlers = {
-            MessageType.CLIENT_CONNECTING: self._on_client_connect,
+            MessageType.CLIENT_CONNECT: self._on_client_connect,
             MessageType.CLIENT_DISCONNECT: self._on_client_disconnect,
             MessageType.GAME_INITIALIZATION: self._on_game_initialization,
-            MessageType.MATCH_END_FRAGLIMIT: self._on_match_end,
-            MessageType.MATCH_END_TIMELIMIT: self._on_match_end,
-            MessageType.WARMUP_STATE: self._on_warmup,
-            MessageType.SHUTDOWN_GAME: self._on_shutdown,
-            MessageType.STATUS_LINE: self._on_status,
+            MessageType.GAME_END: self._on_match_end,
+            MessageType.WARMUP_START: self._on_warmup,
+            MessageType.SERVER_SHUTDOWN: self._on_shutdown,
+            MessageType.STATUS_UPDATE: self._on_status,
         }
 
     def start_server(self):
@@ -89,13 +105,15 @@ class Server:
             "+set",
             "com_protocol",
             "71",
-            "+set"
-            "sv_pure", "0"
+            "+set",
+            "sv_pure",
+            "0",
             "+set",
             "sv_master1",
             "dpmaster.deathmask.net",
             "+set",
-            "sv_maxclients", "4"
+            "sv_maxclients",
+            "4",
             "+set",
             "cl_motd",
             "Welcome To ASTRID lab",
@@ -140,7 +158,7 @@ class Server:
             self.logger.info(f"Kicked {client_type} client {client_id} ({client_name})")
 
             time.sleep(0.5)
-            self.send_command(f"status")
+            self.send_command("status")
         else:
             self.logger.warning(f"Cannot kick client {client_id}: client not found")
 
@@ -148,7 +166,9 @@ class Server:
         """Read a message from the server's stderr."""
         try:
             return (
-                self._process.stderr.readline().decode("utf-8", errors="replace").rstrip()
+                self._process.stderr.readline()
+                .decode("utf-8", errors="replace")
+                .rstrip()
             )
         except (OSError, ValueError) as e:
             self.logger.error(f"Failed to read from server: {e}")
@@ -234,7 +254,7 @@ class Server:
         warmup_info = msg.data.get("warmup_info", "")
         self.logger.info(f"Warmup phase started: {warmup_info}")
 
-        result = self.game_state_manager.handle_warmup_detected()
+        self.game_state_manager.handle_warmup_detected()
 
         if (
             self.game_manager.should_add_bots()
@@ -295,7 +315,11 @@ class Server:
             self.logger.info(
                 f"[CLIENT] New HUMAN client: ID={client_id}, Name={client_name}, IP={client_ip}, Latency={latency}ms"
             )
-            self.run_async(self.obs_connection_manager.connect_single_client_immediately(client_ip, self.network_manager))
+            self.run_async(
+                self.obs_connection_manager.connect_single_client_immediately(
+                    client_ip, self.network_manager
+                )
+            )
 
         elif client_ip == "bot":
             self.network_manager.add_client(
@@ -305,9 +329,7 @@ class Server:
                 name=client_name,
                 is_bot=True,
             )
-            self.logger.info(
-                f"[CLIENT] BOT client: ID={client_id}, Name={client_name}"
-            )
+            self.logger.info(f"[CLIENT] BOT client: ID={client_id}, Name={client_name}")
 
         self._update_player_status()
         self._update_insufficient_humans()
@@ -353,4 +375,3 @@ class Server:
             self.logger.error(f"Error in server loop: {e}", exc_info=True)
         finally:
             self.logger.info("Server loop ended")
-

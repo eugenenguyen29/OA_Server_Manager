@@ -218,4 +218,3 @@ class OBSWebSocketClient:
             await self.websocket.close()
             self.websocket = None
             self.logger.info("Disconnected from OBS WebSocket")
-
