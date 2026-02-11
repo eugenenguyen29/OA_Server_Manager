@@ -9,7 +9,7 @@ class TestAMPStatusParser(unittest.TestCase):
         self.parser = AMPStatusParser()
 
     def test_detect_status_header(self):
-        header = "id     time ping loss      state   rate adr name"
+        header = "---------players--------"
         self.assertTrue(self.parser.is_status_header(header))
 
     def test_parse_valid_client_line(self):

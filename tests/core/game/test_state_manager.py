@@ -67,8 +67,8 @@ class TestShutdownStrategiesUseTransitionMethod:
 
     def test_no_direct_state_assignment(self):
         """Shutdown strategies should not directly assign to current_state."""
-        shutdown_file = Path(
-            "/home/saber/projects/astrid_framework/core/server/shutdown_strategies.py"
+        shutdown_file = (
+            Path(__file__).resolve().parents[3] / "core" / "server" / "shutdown_strategies.py"
         )
         if not shutdown_file.exists():
             pytest.skip("shutdown_strategies.py not found")

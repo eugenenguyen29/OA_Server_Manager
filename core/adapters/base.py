@@ -249,9 +249,8 @@ class GameAdapter(ABC):
         Synchronous command wrapper for callback compatibility.
 
         This default implementation handles various event loop scenarios:
-        - If no event loop exists, creates one with asyncio.run()
-        - If a loop exists but isn't running, uses run_until_complete()
-        - If a loop is already running, creates a task
+        - If a loop is already running, schedules via ``run_coroutine_threadsafe``
+        - Otherwise, creates a temporary loop with ``asyncio.run()``
 
         Args:
             command: The command string to send to the game server.
@@ -259,16 +258,12 @@ class GameAdapter(ABC):
         Returns:
             None (fire-and-forget pattern for callbacks).
         """
-        import asyncio
-
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(self.send_command(command))
-            else:
-                loop.run_until_complete(self.send_command(command))
+            loop = asyncio.get_running_loop()
+            # Loop is running — schedule thread-safely and keep reference
+            asyncio.run_coroutine_threadsafe(self.send_command(command), loop)
         except RuntimeError:
-            # No event loop exists - create one
+            # No running event loop — create a temporary one
             asyncio.run(self.send_command(command))
 
 

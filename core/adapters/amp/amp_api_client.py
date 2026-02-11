@@ -5,7 +5,7 @@ import functools
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, TypeVar
 
 import aiohttp
@@ -50,12 +50,12 @@ class ConsoleEntry:
             try:
                 timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             except ValueError:
-                timestamp = datetime.now()
+                timestamp = datetime.now(timezone.utc)
         else:
             timestamp = (
-                datetime.fromtimestamp(ts / 1000)
+                datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
                 if ts > 1e10
-                else datetime.fromtimestamp(ts)
+                else datetime.fromtimestamp(ts, tz=timezone.utc)
             )
 
         return cls(
@@ -78,11 +78,12 @@ class UpdateResponse:
     def from_dict(cls, data: Dict[str, Any]) -> "UpdateResponse":
         """Create UpdateResponse from API response dict."""
         console_entries = []
+        _logger = logging.getLogger(__name__)
         for entry in data.get("ConsoleEntries", []):
             try:
                 console_entries.append(ConsoleEntry.from_dict(entry))
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug(f"Failed to parse console entry: {e}")
 
         return cls(
             console_entries=console_entries,

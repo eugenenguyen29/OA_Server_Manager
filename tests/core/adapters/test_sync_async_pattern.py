@@ -7,7 +7,6 @@ rather than duplicating code.
 TDD Phase: RED - These tests define the expected behavior.
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
@@ -45,8 +44,8 @@ class TestBaseAdapterSyncCommand:
 class TestSendCommandSyncEventLoopHandling:
     """Test event loop handling in send_command_sync."""
 
-    def test_sync_calls_async_when_no_loop_running(self):
-        """send_command_sync should call async send_command when no loop running."""
+    def test_sync_falls_back_to_asyncio_run_when_no_loop(self):
+        """send_command_sync should use asyncio.run() when no loop running."""
         from core.adapters.openarena.adapter import OAGameAdapter
         from core.adapters.base import GameAdapterConfig
 
@@ -57,39 +56,30 @@ class TestSendCommandSyncEventLoopHandling:
         adapter = OAGameAdapter(config)
         adapter.send_command = AsyncMock()
 
-        # Patch asyncio to simulate no running loop
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = MagicMock()
-            mock_loop.is_running.return_value = False
-            mock_get_loop.return_value = mock_loop
+        # get_running_loop raises RuntimeError when no loop is running
+        with patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")):
+            with patch("asyncio.run") as mock_run:
+                adapter.send_command_sync("test command")
+                mock_run.assert_called_once()
 
-            adapter.send_command_sync("test command")
-
-            # Should have called run_until_complete
-            mock_loop.run_until_complete.assert_called_once()
-
-    def test_sync_creates_task_when_loop_running(self):
-        """send_command_sync should create task when loop already running."""
-        from core.adapters.dota2.adapter import Dota2GameAdapter
+    def test_sync_uses_run_coroutine_threadsafe_when_loop_running(self):
+        """send_command_sync should use run_coroutine_threadsafe when loop running."""
+        from core.adapters.amp.adapter import AMPGameAdapter
         from core.adapters.base import GameAdapterConfig
 
         config = GameAdapterConfig(
-            game_type="dota2",
-            host="localhost",
-            port=27015,
-            password="test",
+            game_type="amp",
+            host="http://localhost:8080",
+            password="admin:password",
         )
-        adapter = Dota2GameAdapter(config)
+        adapter = AMPGameAdapter(config)
         adapter.send_command = AsyncMock()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = MagicMock()
-            mock_loop.is_running.return_value = True
-            mock_get_loop.return_value = mock_loop
-
-            with patch("asyncio.create_task") as mock_create_task:
+        mock_loop = MagicMock()
+        with patch("asyncio.get_running_loop", return_value=mock_loop):
+            with patch("asyncio.run_coroutine_threadsafe") as mock_rcts:
                 adapter.send_command_sync("status")
-                mock_create_task.assert_called_once()
+                mock_rcts.assert_called_once()
 
     def test_sync_handles_runtime_error(self):
         """send_command_sync should handle RuntimeError (no event loop)."""
@@ -104,9 +94,7 @@ class TestSendCommandSyncEventLoopHandling:
         adapter = AMPGameAdapter(config)
         adapter.send_command = AsyncMock()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_get_loop.side_effect = RuntimeError("No event loop")
-
+        with patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")):
             with patch("asyncio.run") as mock_run:
                 adapter.send_command_sync("test")
                 mock_run.assert_called_once()
@@ -122,13 +110,6 @@ class TestAdaptersDontDuplicateSyncCommand:
 
         # The method should be inherited, not overridden
         assert OAGameAdapter.send_command_sync is GameAdapter.send_command_sync
-
-    def test_dota2_adapter_uses_base_implementation(self):
-        """Dota2GameAdapter should inherit send_command_sync from base."""
-        from core.adapters.dota2.adapter import Dota2GameAdapter
-        from core.adapters.base import GameAdapter
-
-        assert Dota2GameAdapter.send_command_sync is GameAdapter.send_command_sync
 
     def test_amp_adapter_uses_base_implementation(self):
         """AMPGameAdapter should inherit send_command_sync from base."""
@@ -156,27 +137,8 @@ class TestSendCommandSyncIntegration:
         send_command_mock = AsyncMock(return_value=None)
         adapter.send_command = send_command_mock
 
-        # Run sync command with a controlled event loop
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = MagicMock()
-            mock_loop.is_running.return_value = False
-
-            # Capture the coroutine passed to run_until_complete
-            captured_coro = None
-
-            def capture_coro(coro):
-                nonlocal captured_coro
-                captured_coro = coro
-                # Actually run it to verify it calls send_command
-                return (
-                    asyncio.get_event_loop_policy()
-                    .new_event_loop()
-                    .run_until_complete(coro)
-                )
-
-            mock_loop.run_until_complete = capture_coro
-            mock_get_loop.return_value = mock_loop
-
+        # No running loop -> falls back to asyncio.run which runs the coroutine
+        with patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")):
             adapter.send_command_sync("test command")
 
             # Verify send_command was called with the right argument
@@ -185,29 +147,21 @@ class TestSendCommandSyncIntegration:
     def test_all_adapters_have_consistent_sync_behavior(self):
         """All adapters should have the same send_command_sync behavior."""
         from core.adapters.openarena.adapter import OAGameAdapter
-        from core.adapters.dota2.adapter import Dota2GameAdapter
         from core.adapters.amp.adapter import AMPGameAdapter
         from core.adapters.base import GameAdapterConfig
 
         # Create all adapter types
         oa_config = GameAdapterConfig(game_type="openarena", binary_path="/fake")
-        dota_config = GameAdapterConfig(
-            game_type="dota2", host="localhost", port=27015, password="test"
-        )
         amp_config = GameAdapterConfig(
             game_type="amp", host="http://localhost:8080", password="admin:pass"
         )
 
         oa_adapter = OAGameAdapter(oa_config)
-        dota_adapter = Dota2GameAdapter(dota_config)
         amp_adapter = AMPGameAdapter(amp_config)
 
         # All should use the same method implementation
         assert (
-            type(oa_adapter).send_command_sync is type(dota_adapter).send_command_sync
-        )
-        assert (
-            type(dota_adapter).send_command_sync is type(amp_adapter).send_command_sync
+            type(oa_adapter).send_command_sync is type(amp_adapter).send_command_sync
         )
 
 
@@ -226,12 +180,8 @@ class TestSendCommandSyncReturnType:
         adapter = OAGameAdapter(config)
         adapter.send_command = AsyncMock(return_value="response")
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = MagicMock()
-            mock_loop.is_running.return_value = False
-            mock_loop.run_until_complete.return_value = "response"
-            mock_get_loop.return_value = mock_loop
-
+        # No running loop -> uses asyncio.run
+        with patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")):
             result = adapter.send_command_sync("test")
 
             # send_command_sync should return None even if async returns value

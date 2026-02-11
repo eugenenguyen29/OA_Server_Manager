@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.adapters.amp.amp_api_client import AMPAPIClient, AMPAPIError
 from core.adapters.amp.adapter import AMPGameAdapter
@@ -150,7 +150,7 @@ async def test_adapter(url: str, username: str, password: str, totp: str = ""):
 
         async for message in adapter.read_messages():
             message_count += 1
-            logger.info(f"Message: {message[:100]}...")
+            logger.info(f"Message: {str(message)[:100]}...")
 
             if (datetime.now() - start_time).seconds >= 10:
                 break

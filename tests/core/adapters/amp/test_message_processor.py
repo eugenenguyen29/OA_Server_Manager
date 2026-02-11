@@ -4,15 +4,16 @@ from core.adapters.amp.message_processor import AMPMessageProcessor
 from core.adapters.base import MessageType
 
 
-class TestYourGameMessageProcessor(unittest.TestCase):
+class TestAMPMessageProcessor(unittest.TestCase):
     def setUp(self):
         self.processor = AMPMessageProcessor()
 
     def test_full_status_parsing_flow(self):
         messages = [
+            "---------players--------",
             "id     time ping loss      state   rate adr name",
             "3    00:05   12    0   spawning  80000 127.190.6.117:52271 'quangminh2479'",
-            "",  # empty line ends status
+            "#end",
         ]
 
         parsed_messages = []

@@ -212,8 +212,8 @@ class TestNoOsSystemUsage:
 
     def test_no_os_system_in_source(self):
         """network_utils should not contain os.system calls."""
-        network_utils_path = Path(
-            "/home/saber/projects/astrid_framework/core/network/network_utils.py"
+        network_utils_path = (
+            Path(__file__).resolve().parents[3] / "core" / "network" / "network_utils.py"
         )
 
         if network_utils_path.exists():
@@ -224,8 +224,8 @@ class TestNoOsSystemUsage:
 
     def test_uses_subprocess_module(self):
         """network_utils should import and use subprocess."""
-        network_utils_path = Path(
-            "/home/saber/projects/astrid_framework/core/network/network_utils.py"
+        network_utils_path = (
+            Path(__file__).resolve().parents[3] / "core" / "network" / "network_utils.py"
         )
 
         if network_utils_path.exists():
