@@ -57,3 +57,7 @@ amp_username = os.getenv("AMP_USERNAME", "")
 amp_password = os.getenv("AMP_PASSWORD", "")
 amp_instance_id = os.getenv("AMP_INSTANCE_ID", "")  # Optional for multi-instance
 amp_poll_interval = float(os.getenv("AMP_POLL_INTERVAL", 2.0))
+
+# TCP Client
+tcp_enabled = get_bool_env("TCP_ENABLED", False)
+tcp_port = int(os.getenv("TCP_PORT", 5000))
