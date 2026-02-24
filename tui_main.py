@@ -506,6 +506,9 @@ class AdminApp(App):
                         tcp_mgr.connect_single_client(client_ip, network_mgr)
                         count += 1
             logging.info(f"TCP connections started for {count} human clients")
+            results = adapter.apply_tcp_latencies()
+            applied = sum(1 for r in results.values() if r is not None)
+            logging.info(f"TCP latencies applied to {applied}/{len(results)} clients")
             self.call_from_thread(self._set_tcp_state, True)
         except Exception as e:
             logging.error(f"Failed to start TCP connections: {e}")

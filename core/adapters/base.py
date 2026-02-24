@@ -262,6 +262,11 @@ class GameAdapter(ABC):
         """Blocking loop: read messages, forward to output handler, dispatch."""
         ...
 
+    def apply_tcp_latencies(self) -> Dict[str, Optional[str]]:
+        """Send current latency assignments to all connected TCP clients."""
+        latency_map = self.network_manager.get_latency_map()
+        return self.tcp_connection_manager.set_latency_all(latency_map)
+
     def send_command_sync(self, command: str) -> None:
         """
         Synchronous command wrapper for callback compatibility.
@@ -277,7 +282,7 @@ class GameAdapter(ABC):
         Returns:
             None (fire-and-forget pattern for callbacks).
         """
-        loop = getattr(self, '_async_loop', None)
+        loop = getattr(self, "_async_loop", None)
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(self.send_command(command), loop)
             return
