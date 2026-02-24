@@ -35,6 +35,7 @@ class TCPClient:
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._connected_event = threading.Event()
         self._want_on = False
 
         self._on_connected = on_connected
@@ -62,6 +63,10 @@ class TCPClient:
         self._disconnect()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+
+    def wait_until_connected(self, timeout: float = 10.0) -> bool:
+        """Block until the socket is connected or timeout expires."""
+        return self._connected_event.wait(timeout=timeout)
 
     def send_line(self, text: str) -> None:
         data = (text + "\n").encode("utf-8")
@@ -131,6 +136,8 @@ class TCPClient:
                 self._sock = sock
                 self._rx_buf = b""
 
+            self._connected_event.set()
+
             if self._on_connected:
                 self._on_connected()
 
@@ -148,6 +155,7 @@ class TCPClient:
 
     def _disconnect(self, reason: Optional[Exception] = None) -> None:
         """Disconnect. Only fires callback when actually transitioning from connected."""
+        self._connected_event.clear()
         with self._lock:
             sock = self._sock
             self._sock = None

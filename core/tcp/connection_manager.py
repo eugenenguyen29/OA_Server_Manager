@@ -85,6 +85,10 @@ class TCPConnectionManager:
         with self._tracker_lock:
             self._client_tracker_map.clear()
 
+    def wait_all_connected(self, timeout: float = 10.0) -> Dict[str, bool]:
+        """Block until every client connects or timeout expires."""
+        return self.tcp_manager.wait_all_connected(timeout)
+
     # ---------- protocol command helpers ----------
 
     def send_cmd(self, client_ip: str, cmd: str) -> Optional[str]:

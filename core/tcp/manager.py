@@ -161,6 +161,17 @@ class TCPClientManager:
             self.disconnect_client(ip)
         return results
 
+    def wait_all_connected(self, timeout: float = 10.0) -> Dict[str, bool]:
+        """Block until every client connects or timeout expires.
+
+        Returns {ip: connected} for each client.
+        """
+        with self._lock:
+            snapshot = dict(self._clients)
+        return {
+            ip: client.wait_until_connected(timeout) for ip, client in snapshot.items()
+        }
+
     def is_client_connected(self, client_ip: str) -> bool:
         with self._lock:
             client = self._clients.get(client_ip)

@@ -262,8 +262,11 @@ class GameAdapter(ABC):
         """Blocking loop: read messages, forward to output handler, dispatch."""
         ...
 
-    def apply_tcp_latencies(self) -> Dict[str, Optional[str]]:
-        """Send current latency assignments to all connected TCP clients."""
+    def apply_tcp_latencies(
+        self, connect_timeout: float = 10.0
+    ) -> Dict[str, Optional[str]]:
+        """Wait for TCP connections then send latency assignments."""
+        self.tcp_connection_manager.wait_all_connected(connect_timeout)
         latency_map = self.network_manager.get_latency_map()
         return self.tcp_connection_manager.set_latency_all(latency_map)
 
