@@ -24,25 +24,15 @@ class OBSWebSocketClient:
         self.websocket = None
         self.request_id_counter = 0
         self.logger = logging.getLogger(__name__)
+        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._reader_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
         """Connect to OBS WebSocket server."""
         try:
             uri = f"ws://{self.host}:{self.port}"
-            # Try connection without subprotocol first (more compatible)
-            try:
-                self.websocket = await websockets.connect(uri)
-                self.logger.info(
-                    f"Connected to OBS WebSocket at {uri} (no subprotocol)"
-                )
-            except Exception:
-                # Fallback to subprotocol if needed
-                self.websocket = await websockets.connect(
-                    uri, subprotocols=["obswebsocket"]
-                )
-                self.logger.info(
-                    f"Connected to OBS WebSocket at {uri} (with subprotocol)"
-                )
+            self.websocket = await websockets.connect(uri, open_timeout=10)
+            self.logger.info(f"Connected to OBS WebSocket at {uri}")
 
             # Wait for Hello message with timeout
             hello_message = await asyncio.wait_for(self.websocket.recv(), timeout=10.0)
@@ -73,6 +63,10 @@ class OBSWebSocketClient:
                 )
 
             self.logger.info("Successfully identified with OBS WebSocket")
+
+            # Start background message reader for dispatching responses
+            self._reader_task = asyncio.create_task(self._message_reader())
+
             return True
 
         except Exception as e:
@@ -112,6 +106,27 @@ class OBSWebSocketClient:
         self.request_id_counter += 1
         return str(self.request_id_counter)
 
+    async def _message_reader(self):
+        """Background task that dispatches incoming WebSocket messages."""
+        try:
+            while self.websocket:
+                try:
+                    raw = await self.websocket.recv()
+                    msg = json.loads(raw)
+                    op_code = msg.get("op")
+                    if op_code == 7:  # RequestResponse
+                        request_id = msg.get("d", {}).get("requestId")
+                        fut = self._pending_requests.pop(request_id, None)
+                        if fut and not fut.done():
+                            fut.set_result(msg.get("d", {}))
+                    # op_code 5 = Event - can be logged or handled later
+                except websockets.ConnectionClosed:
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     async def send_request(
         self, request_type: str, request_data: Optional[Dict] = None
     ) -> Dict[str, Any]:
@@ -121,41 +136,33 @@ class OBSWebSocketClient:
 
         request_id = self._get_next_request_id()
 
-        request_message = {
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_requests[request_id] = fut
+
+        payload = {
             "op": 6,  # OpCode 6 = Request
             "d": {"requestType": request_type, "requestId": request_id},
         }
 
         if request_data:
-            request_message["d"]["requestData"] = request_data
+            payload["d"]["requestData"] = request_data
 
-        await self.websocket.send(json.dumps(request_message))
+        await self.websocket.send(json.dumps(payload))
 
-        timeout_seconds = 10.0
-        start_time = asyncio.get_event_loop().time()
+        try:
+            result = await asyncio.wait_for(fut, timeout=15.0)
+        except asyncio.TimeoutError:
+            self._pending_requests.pop(request_id, None)
+            raise
 
-        while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout_seconds:
-                raise Exception(f"Request timeout after {timeout_seconds}s")
-
-            response_message = await asyncio.wait_for(
-                self.websocket.recv(), timeout=timeout_seconds - elapsed
+        if result.get("requestStatus", {}).get("result"):
+            return result.get("responseData", {})
+        else:
+            error_code = result.get("requestStatus", {}).get("code")
+            error_comment = result.get("requestStatus", {}).get(
+                "comment", "Unknown error"
             )
-            response_data = json.loads(response_message)
-
-            if response_data["op"] == 7:  # OpCode 7 = RequestResponse
-                if response_data["d"]["requestId"] == request_id:
-                    if response_data["d"]["requestStatus"]["result"]:
-                        return response_data["d"].get("responseData", {})
-                    else:
-                        error_code = response_data["d"]["requestStatus"]["code"]
-                        error_comment = response_data["d"]["requestStatus"].get(
-                            "comment", "Unknown error"
-                        )
-                        raise Exception(
-                            f"OBS Request failed: {error_code} - {error_comment}"
-                        )
+            raise Exception(f"OBS Request failed: {error_code} - {error_comment}")
 
     async def start_record(self) -> bool:
         """Start recording in OBS."""
@@ -214,6 +221,13 @@ class OBSWebSocketClient:
 
     async def disconnect(self) -> None:
         """Disconnect from OBS WebSocket server."""
+        if self._reader_task:
+            self._reader_task.cancel()
+            self._reader_task = None
+        for fut in self._pending_requests.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending_requests.clear()
         if self.websocket:
             await self.websocket.close()
             self.websocket = None

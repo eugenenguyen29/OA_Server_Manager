@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import queue
 from collections import OrderedDict
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
@@ -21,6 +22,7 @@ from core.game.game_manager import GameManager
 from core.game.state_manager import GameStateManager
 from core.network.network_manager import NetworkManager
 from core.obs.connection_manager import OBSConnectionManager
+from core.tcp.connection_manager import TCPConnectionManager
 import core.utils.settings as settings
 
 
@@ -114,6 +116,7 @@ class AMPGameAdapter(GameAdapter):
         # Output / async plumbing
         self._output_handler: Optional[Callable[[str], None]] = None
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._output_queue: queue.Queue[str] = queue.Queue()
 
         # ── Sub-managers (compositional ownership) ───────────────
         self._message_processor = AMPMessageProcessor(
@@ -131,6 +134,10 @@ class AMPGameAdapter(GameAdapter):
             obs_timeout=int(getattr(settings, "obs_connection_timeout", 30)),
             send_command_callback=self.send_command_sync,
             kick_client_callback=self._kick_client_by_ip,
+        )
+        self._tcp_connection_manager = TCPConnectionManager(
+            tcp_port=settings.tcp_port,
+            send_command_callback=self.send_command_sync,
         )
 
         # ── Message dispatch table ───────────────────────────────
@@ -178,6 +185,10 @@ class AMPGameAdapter(GameAdapter):
     @property
     def obs_connection_manager(self) -> OBSConnectionManager:
         return self._obs_connection_manager
+
+    @property
+    def tcp_connection_manager(self) -> TCPConnectionManager:
+        return self._tcp_connection_manager
 
     @property
     def message_processor(self) -> AMPMessageProcessor:
@@ -352,6 +363,12 @@ class AMPGameAdapter(GameAdapter):
         self.logger.info(f"Kicking client {client_id}")
         await self.send_command(f"kickid {client_id}")
 
+    async def add_bot(self) -> None:
+        self.logger.warning("add_bot not supported for AMP adapter")
+
+    async def remove_all_bots(self) -> None:
+        self.logger.warning("remove_all_bots not supported for AMP adapter")
+
     # ── Output / async plumbing ──────────────────────────────────
 
     def set_output_handler(self, handler: Callable[[str], None]) -> None:
@@ -414,21 +431,57 @@ class AMPGameAdapter(GameAdapter):
         """Async implementation of the server loop."""
         async for msg in self.read_messages():
             if self._output_handler:
-                self._output_handler(msg.raw_message)
+                self._output_queue.put(msg.raw_message)
             # Dispatch to handler
             handler = self.message_handlers.get(msg.message_type)
             if handler:
                 handler(msg)
+
+    def drain_output_queue(self) -> List[str]:
+        """Drain all pending output messages. Safe to call from any thread."""
+        messages: List[str] = []
+        while not self._output_queue.empty():
+            try:
+                messages.append(self._output_queue.get_nowait())
+            except queue.Empty:
+                break
+        return messages
 
     # ── Event handlers ───────────────────────────────────────────
 
     def _on_status(self, msg: ParsedMessage) -> None:
         """Handle STATUS_UPDATE messages - populate clients from status data."""
         if msg.data.get("status_complete"):
+            current_ids: set[int] = set()
             for client_data in msg.data.get("clients", []):
+                current_ids.add(client_data["client_id"])
                 self._process_discovered_client(client_data)
+            self._reconcile_clients(current_ids)
         elif msg.data.get("client_data"):
             self._process_discovered_client(msg.data["client_data"])
+
+    def _reconcile_clients(self, current_client_ids: set[int]) -> None:
+        """Remove tracked clients that are no longer present on the server."""
+        tracked_ids = set(self._network_manager.client_type_map.keys())
+        stale_ids = tracked_ids - current_client_ids
+
+        for client_id in stale_ids:
+            client_ip = self._network_manager.get_client_ip(client_id)
+            if client_ip and self._obs_connection_manager.is_client_connected(
+                client_ip
+            ):
+                self.run_async(
+                    self._obs_connection_manager.disconnect_client(client_ip)
+                )
+            if client_ip and self._tcp_connection_manager.is_client_connected(
+                client_ip
+            ):
+                self._tcp_connection_manager.disconnect_client(client_ip)
+            self._network_manager.remove_client(client_id)
+            self.logger.info(
+                f"[RECONCILE] Removed stale client {client_id}. "
+                f"Current players: {self._network_manager.get_client_count()}"
+            )
 
     def _process_discovered_client(self, client_data: Dict[str, Any]) -> None:
         """Register a discovered client into network_manager."""
@@ -459,6 +512,9 @@ class AMPGameAdapter(GameAdapter):
                 self._obs_connection_manager.connect_single_client_immediately(
                     client_ip, self._network_manager
                 )
+            )
+            self._tcp_connection_manager.connect_single_client(
+                client_ip, self._network_manager
             )
         elif client_ip == "bot":
             self._network_manager.add_client(

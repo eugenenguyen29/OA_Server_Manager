@@ -11,6 +11,7 @@ Security features:
 - Graceful error handling
 """
 
+import asyncio
 import subprocess
 import logging
 import re
@@ -298,6 +299,12 @@ def apply_latency_rules(ip_latency_map: Dict[str, int], interface: str) -> bool:
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         return False
+
+
+async def apply_latency_rules_async(ip_latency_map: Dict[str, int], interface: str) -> bool:
+    """Run latency rule application in executor to avoid blocking the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, apply_latency_rules, ip_latency_map, interface)
 
 
 def dispose(interface: str) -> bool:

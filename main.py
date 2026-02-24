@@ -32,9 +32,7 @@ def create_adapter_config() -> GameAdapterConfig:
     if game_type == "dota2":
         return GameAdapterConfig(
             game_type="dota2",
-            host=settings.dota2_rcon_host,
-            port=settings.dota2_rcon_port,
-            password=settings.dota2_rcon_password,
+            binary_path=settings.dota2_script_path,
             poll_interval=settings.dota2_poll_interval,
         )
     else:  # Default to OpenArena
@@ -100,6 +98,9 @@ def signal_handler(sig, frame):
         sys.exit(1)
 
 
+_loop_ready = threading.Event()
+
+
 def run_async_loop():
     """Run the async event loop in a separate thread."""
     global async_loop
@@ -119,6 +120,7 @@ def run_async_loop():
             logger.error(f"Async loop error: {context['message']}")
 
     async_loop.set_exception_handler(exception_handler)
+    _loop_ready.set()
 
     try:
         logger.info("Starting async event loop")
@@ -148,7 +150,7 @@ async def run_dota2_adapter():
     config = create_adapter_config()
     game_adapter = GameAdapterRegistry.create(config)
 
-    logger.info(f"Connecting to Dota 2 server at {config.host}:{config.port}...")
+    logger.info("Starting Dota 2 adapter...")
 
     if not await game_adapter.connect():
         logger.error("Failed to connect to Dota 2 server")
@@ -184,13 +186,13 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     game_type = settings.game_type
-    logger.info(f"Starting ASTRID Server Management System")
+    logger.info("Starting ASTRID Server Management System")
     logger.info(f"Game type: {game_type.upper()}")
     logger.info(f"Available adapters: {GameAdapterRegistry.get_available_games()}")
 
     if game_type == "dota2":
-        # Dota 2 mode - use RCON adapter
-        logger.info("Running in Dota 2 RCON mode")
+        # Dota 2 mode - use subprocess adapter
+        logger.info("Running in Dota 2 subprocess mode")
 
         dota2_thread = threading.Thread(target=run_dota2_thread, name="Dota2Thread")
         dota2_thread.start()
@@ -210,7 +212,7 @@ def main():
         async_thread = threading.Thread(target=run_async_loop, daemon=True)
         async_thread.start()
 
-        time.sleep(0.2)
+        _loop_ready.wait(timeout=5.0)
 
         server_thread = threading.Thread(target=run_server_thread, name="ServerThread")
         server_thread.start()

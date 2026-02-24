@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import random
 import signal
 import sys
 import threading
@@ -32,21 +31,36 @@ cleanup_done = False
 
 def _create_adapter() -> GameAdapter:
     """Create the adapter from settings using the registry."""
-    # Build password field: AMP expects "username:password", OA ignores it
-    amp_user = getattr(settings, "amp_username", None)
-    amp_pass = getattr(settings, "amp_password", None)
-    password = f"{amp_user}:{amp_pass}" if amp_user and amp_pass else None
+    game_type = settings.game_type
 
-    config = GameAdapterConfig(
-        game_type=settings.game_type,
-        host=getattr(settings, "amp_base_url", "localhost"),
-        password=password,
-        poll_interval=getattr(settings, "amp_poll_interval", 2.0),
-        binary_path=getattr(settings, "oa_binary_path", None),
-        port=getattr(settings, "oa_port", 27960),
-    )
-    if hasattr(settings, "amp_instance_id"):
-        config.instance_id = settings.amp_instance_id  # type: ignore[attr-defined]
+    if game_type == "dota2":
+        logger = logging.getLogger(__name__)
+        logger.info(f"[Dota2] Script path: {settings.dota2_script_path}")
+        config = GameAdapterConfig(
+            game_type="dota2",
+            binary_path=settings.dota2_script_path,
+            poll_interval=settings.dota2_poll_interval,
+        )
+    elif game_type == "amp":
+        amp_user = getattr(settings, "amp_username", None)
+        amp_pass = getattr(settings, "amp_password", None)
+        password = f"{amp_user}:{amp_pass}" if amp_user and amp_pass else None
+        config = GameAdapterConfig(
+            game_type="amp",
+            host=settings.amp_base_url,
+            password=password,
+            poll_interval=settings.amp_poll_interval,
+        )
+        if hasattr(settings, "amp_instance_id"):
+            config.instance_id = settings.amp_instance_id  # type: ignore[attr-defined]
+    else:  # openarena
+        config = GameAdapterConfig(
+            game_type="openarena",
+            host="localhost",
+            port=settings.oa_port,
+            binary_path=settings.oa_binary_path,
+        )
+
     return GameAdapterRegistry.create(config)
 
 
@@ -91,14 +105,15 @@ def run_async_loop(adapter_ref: GameAdapter | None = None):
 
 
 class TUILogHandler(logging.Handler):
-    def __init__(self, log_widget):
+    def __init__(self, log_widget, app):
         super().__init__()
         self.log_widget = log_widget
+        self.app = app
 
     def emit(self, record):
         try:
             msg = self.format(record)
-            self.log_widget.write_line(msg)
+            self.app.call_from_thread(self.log_widget.write_line, msg)
         except Exception as e:
             print(f"TUI log error: {e}", file=sys.stderr)
 
@@ -146,7 +161,7 @@ class AdminApp(App):
                     DataTable(id="user-table"),
                     id="left-panel",
                 ),
-                Vertical(Log(id="app-log"), Log(id="server-log"), id="right-panel"),
+                Vertical(Log(id="app-log", max_lines=2000), Log(id="server-log", max_lines=2000), id="right-panel"),
                 id="content-panel",
             ),
             id="main-container",
@@ -189,30 +204,34 @@ class AdminApp(App):
     def _update_server_log(self, message: str):
         """Update server log from worker thread."""
         try:
-            server_log = self.query_one("#server-log", Log)
             for line in message.split("\n"):
-                server_log.write_line(line)
+                self._server_log.write_line(line)
         except Exception as e:
             logging.debug(f"Failed to update server log: {e}")
 
     def on_mount(self) -> None:
         global async_thread, adapter
 
-        app_log = self.query_one("#app-log", Log)
-        server_log = self.query_one("#server-log", Log)
+        # Cache widget references to avoid repeated query_one calls
+        self._app_log = self.query_one("#app-log", Log)
+        self._server_log = self.query_one("#server-log", Log)
+        self._user_table = self.query_one("#user-table", DataTable)
+        self._state_label = self.query_one("#status-state", Label)
+        self._round_label = self.query_one("#status-round", Label)
+        self._start_btn = self.query_one("#start-server-btn", Button)
+        self._prev_table_data = []
 
-        app_log.border_title = "App Logs"
-        server_log.border_title = "Server Output"
+        self._app_log.border_title = "App Logs"
+        self._server_log.border_title = "Server Output"
 
         input_widget = self.query_one("#input", Input)
         input_widget.border_title = "Command Input"
 
-        user_table = self.query_one("#user-table", DataTable)
-        user_table.border_title = "Connected Users"
-        user_table.cursor_type = "row"
-        user_table.add_columns("ID", "Name", "IP", "OBS", "Action")
+        self._user_table.border_title = "Connected Users"
+        self._user_table.cursor_type = "row"
+        self._user_table.add_columns("ID", "Name", "IP", "OBS", "Action")
 
-        handler = TUILogHandler(app_log)
+        handler = TUILogHandler(self._app_log, self)
         handler.setFormatter(
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
         )
@@ -281,9 +300,6 @@ class AdminApp(App):
 
     def update_status_display(self):
         try:
-            state_label = self.query_one("#status-state", Label)
-            round_label = self.query_one("#status-round", Label)
-
             current_state = "Idle"
             current_round = 0
             max_rounds = 0
@@ -293,20 +309,21 @@ class AdminApp(App):
                 current_round = adapter.game_state_manager.round_count
                 max_rounds = adapter.game_state_manager.max_rounds
 
-            state_label.update(f"State: {current_state}")
-            round_label.update(f"Round: {current_round}/{max_rounds}")
+            self._state_label.update(f"State: {current_state}")
+            self._round_label.update(f"Round: {current_round}/{max_rounds}")
         except Exception as e:
             logging.error(f"Error updating status display: {e}")
 
     def update_user_table(self):
         try:
-            user_table = self.query_one("#user-table", DataTable)
-            user_table.clear()
-
             if adapter is None:
+                if self._prev_table_data:
+                    self._prev_table_data = []
+                    self._user_table.clear()
                 return
 
             network_mgr = adapter.network_manager
+            new_data = []
 
             for client_id, client_type in network_mgr.client_type_map.items():
                 name = network_mgr.client_name_map.get(client_id, f"Client_{client_id}")
@@ -326,52 +343,38 @@ class AdminApp(App):
                         else "-"
                     )
 
-                user_table.add_row(str(client_id), name, client_ip, obs_status, "Kick")
+                new_data.append((str(client_id), name, client_ip, obs_status, "Kick"))
+
+            if new_data != self._prev_table_data:
+                self._prev_table_data = new_data
+                self._user_table.clear()
+                for row in new_data:
+                    self._user_table.add_row(*row)
         except Exception as e:
             logging.error(f"Error updating user table: {e}")
 
     def update_start_button(self):
         try:
-            start_btn = self.query_one("#start-server-btn", Button)
-            start_btn.disabled = adapter is not None and adapter.is_connected
+            self._start_btn.disabled = adapter is not None and adapter.is_connected
         except Exception as e:
             logging.error(f"Error updating start button: {e}")
 
     def setup_periodic_updates(self):
-        def periodic_update():
-            if not cleanup_done:
-                self.update_status_display()
-                self.update_user_table()
-                self.update_start_button()
-                timer = threading.Timer(2.0, periodic_update)
-                timer.daemon = True
-                timer.start()
+        self.set_interval(2.0, self._periodic_update)
 
-        timer = threading.Timer(2.0, periodic_update)
-        timer.daemon = True
-        timer.start()
+    def _periodic_update(self):
+        if not cleanup_done:
+            self.update_status_display()
+            self.update_user_table()
+            self.update_start_button()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-bot-btn":
-            bot_names = [
-                "Angelyss",
-                "Arachna",
-                "Major",
-                "Sarge",
-                "Skelebot",
-                "Merman",
-                "Beret",
-                "Kyonshi",
-            ]
-            bot_name = random.choice(bot_names)
-            difficulty = settings.bot_difficulty
-            self._send_adapter_command(f"addbot {bot_name} {difficulty}")
-            logging.info(
-                f"Bot addition requested: {bot_name} (difficulty {difficulty})"
-            )
+            self._run_adapter_coro(adapter.add_bot())
+            logging.info("Bot addition requested")
 
         elif event.button.id == "remove-bot-btn":
-            self._send_adapter_command("kick allbots")
+            self._run_adapter_coro(adapter.remove_all_bots())
             logging.info("All bots removal requested")
 
         elif event.button.id == "start-server-btn":
@@ -379,6 +382,14 @@ class AdminApp(App):
 
         elif event.button.id == "kill-server-btn":
             self._stop_adapter()
+
+    def _run_adapter_coro(self, coro) -> None:
+        """Schedule an adapter coroutine on the async loop."""
+        if adapter is None or not adapter.is_connected:
+            logging.warning("Adapter not connected")
+            return
+        if async_loop and async_loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, async_loop)
 
     def _stop_adapter(self):
         """Stop/disconnect the adapter."""
@@ -402,8 +413,7 @@ class AdminApp(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "user-table":
             try:
-                user_table = self.query_one("#user-table", DataTable)
-                row_data = user_table.get_row(event.row_key)
+                row_data = self._user_table.get_row(event.row_key)
                 client_id = int(row_data[0])
                 user_name = row_data[1]
 

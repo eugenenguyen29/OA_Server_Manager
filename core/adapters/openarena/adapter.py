@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import subprocess
 import threading
 import time
@@ -22,6 +23,7 @@ from core.game.game_manager import GameManager
 from core.game.state_manager import GameStateManager
 from core.network.network_manager import NetworkManager
 from core.obs.connection_manager import OBSConnectionManager
+from core.tcp.connection_manager import TCPConnectionManager
 from core.server.shutdown_strategies import (
     MatchShutdownStrategy,
     WarmupShutdownStrategy,
@@ -66,6 +68,10 @@ class OAGameAdapter(GameAdapter):
             obs_timeout=int(getattr(settings, "obs_connection_timeout", 30)),
             send_command_callback=self.send_command_sync,
             kick_client_callback=self._kick_client_by_ip,
+        )
+        self._tcp_connection_manager = TCPConnectionManager(
+            tcp_port=settings.tcp_port,
+            send_command_callback=self.send_command_sync,
         )
 
         # ── Shutdown strategies ──────────────────────────────────
@@ -127,6 +133,10 @@ class OAGameAdapter(GameAdapter):
         return self._obs_connection_manager
 
     @property
+    def tcp_connection_manager(self) -> TCPConnectionManager:
+        return self._tcp_connection_manager
+
+    @property
     def message_processor(self) -> OAMessageProcessor:
         return self._message_processor
 
@@ -177,19 +187,28 @@ class OAGameAdapter(GameAdapter):
                 self.logger.error(f"Failed to send command: {e}")
         return None
 
+    def _read_line_from_stderr(self) -> str:
+        """Read one line from stderr (blocking). Called via asyncio.to_thread."""
+        if self._process and self._process.stderr:
+            return (
+                self._process.stderr.readline()
+                .decode("utf-8", errors="replace")
+                .rstrip()
+            )
+        return ""
+
     async def read_messages(self) -> AsyncIterator[ParsedMessage]:
         while not self._shutdown_event.is_set() and self.is_connected:
             try:
-                line = (
-                    self._process.stderr.readline()
-                    .decode("utf-8", errors="replace")
-                    .rstrip()
-                )
+                line = await asyncio.to_thread(self._read_line_from_stderr)
                 if line:
-                    yield self._message_processor.process_message(line)
+                    parsed = self._message_processor.process_message(line)
+                    if parsed:
+                        yield parsed
+                else:
+                    await asyncio.sleep(0.01)
             except (OSError, ValueError):
                 break
-            await asyncio.sleep(0.01)
 
     def read_message_sync(self) -> str:
         """Synchronous message reading for the main loop."""
@@ -278,6 +297,17 @@ class OAGameAdapter(GameAdapter):
         self.logger.info(f"Kicking client {client_id}")
         await self.send_command(f"clientkick {client_id}")
 
+    async def add_bot(self) -> None:
+        bot_names = self._game_manager.OA_BOT_NAMES
+        bot_name = random.choice(bot_names)
+        difficulty = settings.bot_difficulty
+        self.logger.info(f"Adding bot {bot_name} (difficulty {difficulty})")
+        await self.send_command(f"addbot {bot_name} {difficulty}")
+
+    async def remove_all_bots(self) -> None:
+        self.logger.info("Removing all bots")
+        await self.send_command("kick allbots")
+
     def request_shutdown(self) -> None:
         self._shutdown_event.set()
 
@@ -311,7 +341,8 @@ class OAGameAdapter(GameAdapter):
                     else:
                         print(f"[SERVER] {message}")
                     self.process_server_message(message)
-                time.sleep(0.01)
+                else:
+                    time.sleep(0.01)
         except KeyboardInterrupt:
             self.logger.info("Server loop interrupted by user")
         except Exception as e:
@@ -338,6 +369,8 @@ class OAGameAdapter(GameAdapter):
 
         if client_ip and self._obs_connection_manager.is_client_connected(client_ip):
             self.run_async(self._obs_connection_manager.disconnect_client(client_ip))
+        if client_ip and self._tcp_connection_manager.is_client_connected(client_ip):
+            self._tcp_connection_manager.disconnect_client(client_ip)
 
         self._network_manager.remove_client(client_id)
         self.logger.info(
@@ -420,6 +453,9 @@ class OAGameAdapter(GameAdapter):
                 self._obs_connection_manager.connect_single_client_immediately(
                     client_ip, self._network_manager
                 )
+            )
+            self._tcp_connection_manager.connect_single_client(
+                client_ip, self._network_manager
             )
         elif client_ip == "bot":
             self._network_manager.add_client(

@@ -38,6 +38,9 @@ class OAMessageProcessor(BaseMessageProcessor):
         # Status parser (replaces 6 legacy state variables)
         self._status_parser = OAStatusParser()
 
+        # Accumulate parsed clients during status parsing (keyed by client_id)
+        self._parsed_clients: Dict[int, Dict] = {}
+
         # Client count tracking (used for logging only)
         self._status_client_count = 0
 
@@ -103,6 +106,7 @@ class OAMessageProcessor(BaseMessageProcessor):
             self.logger.debug("Detected status header, starting status parsing")
             self._status_parser.start_parsing()
             self._status_client_count = 0
+            self._parsed_clients.clear()
             return self._handle_status_line(raw_message)
 
         # Continue status parsing if in progress
@@ -254,7 +258,10 @@ class OAMessageProcessor(BaseMessageProcessor):
             if re.match(r"^\s*\d+\s+", raw_message):
                 client_data = self._status_parser.parse_client_line(raw_message)
                 if client_data:
-                    self._status_client_count += 1
+                    cid = client_data["client_id"]
+                    if cid not in self._parsed_clients:
+                        self._parsed_clients[cid] = client_data
+                        self._status_client_count += 1
                     self.logger.info(
                         f"[STATUS] Extracted client: ID={client_data.get('client_id')}, "
                         f"Name={client_data.get('name')}, IP={client_data.get('ip')}"
@@ -276,28 +283,8 @@ class OAMessageProcessor(BaseMessageProcessor):
         return ParsedMessage(MessageType.STATUS_UPDATE, raw_message)
 
     def _extract_client_data_from_status(self) -> List[Dict]:
-        """Extract all client data from collected status lines."""
-        client_data_list = []
-        lines = self._status_parser.lines
-
-        self.logger.info(f"Processing {len(lines)} status lines")
-
-        for i, line in enumerate(lines, 1):
-            if i <= 3:  # Skip map, headers, and separator lines
-                continue
-
-            client_data = self._status_parser.parse_client_line(line)
-            if client_data:
-                existing = next(
-                    (
-                        c
-                        for c in client_data_list
-                        if c["client_id"] == client_data["client_id"]
-                    ),
-                    None,
-                )
-                if not existing:
-                    client_data_list.append(client_data)
+        """Return already-parsed client data accumulated during status parsing."""
+        client_data_list = list(self._parsed_clients.values())
 
         human_clients = [c for c in client_data_list if c["type"] == "HUMAN"]
         bot_clients = [c for c in client_data_list if c["type"] == "BOT"]

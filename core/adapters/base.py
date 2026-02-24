@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from core.game.state_manager import GameStateManager
     from core.network.network_manager import NetworkManager
     from core.obs.connection_manager import OBSConnectionManager
+    from core.tcp.connection_manager import TCPConnectionManager
 
 
 @runtime_checkable
@@ -34,6 +35,7 @@ class ClientTracker(Protocol):
     """
 
     def set_obs_status(self, ip: str, connected: bool) -> None: ...
+    def set_tcp_status(self, ip: str, connected: bool) -> None: ...
     def get_client_id_by_ip(self, ip: str) -> Optional[int]: ...
     def get_client_info_table(self) -> List[List[Any]]: ...
     def get_human_count(self) -> int: ...
@@ -100,7 +102,7 @@ class GameAdapterConfig:
     password: Optional[str] = None
     binary_path: Optional[str] = None
     startup_args: Optional[List[str]] = None
-    poll_interval: float = 5.0
+    poll_interval: float = 2.0
 
 
 class GameAdapter(ABC):
@@ -172,6 +174,16 @@ class GameAdapter(ABC):
         """Kick a client from the server by client ID."""
         pass
 
+    @abstractmethod
+    async def add_bot(self) -> None:
+        """Add a single bot to the server."""
+        pass
+
+    @abstractmethod
+    async def remove_all_bots(self) -> None:
+        """Remove all bots from the server."""
+        pass
+
     # ── Manager ownership (compositional) ──────────────────────────
 
     @property
@@ -196,6 +208,12 @@ class GameAdapter(ABC):
     @abstractmethod
     def obs_connection_manager(self) -> OBSConnectionManager:
         """Return the OBSConnectionManager instance owned by this adapter."""
+        ...
+
+    @property
+    @abstractmethod
+    def tcp_connection_manager(self) -> TCPConnectionManager:
+        """Return the TCPConnectionManager instance owned by this adapter."""
         ...
 
     @property
@@ -249,6 +267,7 @@ class GameAdapter(ABC):
         Synchronous command wrapper for callback compatibility.
 
         This default implementation handles various event loop scenarios:
+        - If a shared ``_async_loop`` is available, uses it first
         - If a loop is already running, schedules via ``run_coroutine_threadsafe``
         - Otherwise, creates a temporary loop with ``asyncio.run()``
 
@@ -258,12 +277,14 @@ class GameAdapter(ABC):
         Returns:
             None (fire-and-forget pattern for callbacks).
         """
+        loop = getattr(self, '_async_loop', None)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.send_command(command), loop)
+            return
         try:
             loop = asyncio.get_running_loop()
-            # Loop is running — schedule thread-safely and keep reference
             asyncio.run_coroutine_threadsafe(self.send_command(command), loop)
         except RuntimeError:
-            # No running event loop — create a temporary one
             asyncio.run(self.send_command(command))
 
 
