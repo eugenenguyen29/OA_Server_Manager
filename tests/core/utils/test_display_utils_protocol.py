@@ -41,6 +41,9 @@ def test_display_client_table_with_mock_client_tracker():
         def set_obs_status(self, ip: str, connected: bool) -> None:
             pass
 
+        def set_tcp_status(self, ip: str, connected: bool) -> None:
+            pass
+
         def get_client_id_by_ip(self, ip: str):
             return None
 

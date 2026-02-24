@@ -1,7 +1,6 @@
 """Tests for ClientTracker Protocol and OBSConnectionManager kick callback."""
 
 import inspect
-from typing import Any, List, Optional
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -88,10 +87,9 @@ async def test_client_tracker_methods_called_correctly() -> None:
         new_callable=AsyncMock,
         return_value=True,
     ):
-        with patch.object(obs_mgr.display_utils, "display_client_table"):
-            result = await obs_mgr.connect_single_client_immediately(
-                "192.168.1.50", client_tracker
-            )
+        result = await obs_mgr.connect_single_client_immediately(
+            "192.168.1.50", client_tracker
+        )
 
     assert result is True
     client_tracker.set_obs_status.assert_called_once_with("192.168.1.50", True)

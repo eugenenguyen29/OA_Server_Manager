@@ -420,6 +420,7 @@ class TestAMPAdapterKickCallback:
     def test_kick_callback_uses_correct_game_command_amp(self):
         adapter = _make_adapter()
         adapter._network_manager.client_ip_map = {456: "10.0.0.5"}
+        adapter._network_manager._ip_to_client_id = {"10.0.0.5": 456}
 
         with patch.object(adapter, "kick_client", new_callable=AsyncMock) as mock_kick:
             loop = asyncio.new_event_loop()

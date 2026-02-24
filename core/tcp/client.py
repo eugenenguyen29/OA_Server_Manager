@@ -1,5 +1,6 @@
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -14,7 +15,7 @@ class TCPClientConfig:
     reconnect_delay_sec: float = 1.5
 
     # protocol details
-    hello_line: str = "HELLO from TCP_client"
+    hello_line: str = ""  # manager sets per-client value (Bug 5 fix)
     auto_hello: bool = True
 
 
@@ -88,8 +89,6 @@ class TCPClient:
             if not want_on:
                 if connected:
                     self._disconnect()
-                import time
-
                 time.sleep(0.1)
                 continue
 
@@ -97,8 +96,6 @@ class TCPClient:
                 err = self._connect()
                 if err is not None:
                     if self.cfg.reconnect:
-                        import time
-
                         time.sleep(self.cfg.reconnect_delay_sec)
                         continue
                     with self._lock:
@@ -111,13 +108,13 @@ class TCPClient:
             except Exception as e:
                 self._disconnect(e)
                 if self.cfg.reconnect:
-                    import time
-
                     time.sleep(self.cfg.reconnect_delay_sec)
 
         self._disconnect()
 
     def _connect(self) -> Optional[Exception]:
+        """Atomic connect + handshake. Only assigns self._sock on full success."""
+        sock: Optional[socket.socket] = None
         try:
             sock = socket.create_connection(
                 (self.cfg.host, self.cfg.port),
@@ -125,6 +122,11 @@ class TCPClient:
             )
             sock.settimeout(self.cfg.recv_timeout_sec)
 
+            # Send HELLO BEFORE assigning to self._sock (Bug 1 fix)
+            if self.cfg.auto_hello and self.cfg.hello_line:
+                sock.sendall((self.cfg.hello_line + "\n").encode("utf-8"))
+
+            # Only assign after full success
             with self._lock:
                 self._sock = sock
                 self._rx_buf = b""
@@ -132,35 +134,37 @@ class TCPClient:
             if self._on_connected:
                 self._on_connected()
 
-            # send HELLO (server expects this first)
-            if self.cfg.auto_hello:
-                self.send_line(self.cfg.hello_line)
-
             return None
         except Exception as e:
-            try:
-                sock.close()  # type: ignore[possibly-undefined]
-            except Exception:
-                pass
-            if self._on_disconnected:
-                self._on_disconnected(e)
+            # Bug 4 fix: guard against sock being None
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            # Bug 2 fix: do NOT fire _on_disconnected here — we were never
+            # in the "connected" state so there's nothing to disconnect from
             return e
 
     def _disconnect(self, reason: Optional[Exception] = None) -> None:
+        """Disconnect. Only fires callback when actually transitioning from connected."""
         with self._lock:
             sock = self._sock
             self._sock = None
             self._rx_buf = b""
 
-        if sock:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                sock.close()
-            except Exception:
-                pass
+        # Bug 2 fix: only fire callback if we actually had a socket
+        if sock is None:
+            return
+
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
 
         if self._on_disconnected:
             self._on_disconnected(reason)
@@ -188,3 +192,46 @@ class TCPClient:
         except socket.timeout:
             # normal, no data yet
             return
+
+
+class CommandChannel:
+    """Thread-safe request/response over an existing TCPClient.
+
+    Intercepts the on_line callback to capture responses.
+    Serializes concurrent send_cmd() calls via a lock.
+    """
+
+    def __init__(self, client: TCPClient, timeout: float = 5.0):
+        self._client = client
+        self._timeout = timeout
+        self._cmd_lock = threading.Lock()
+        self._response_event = threading.Event()
+        self._response_line: Optional[str] = None
+
+        # Chain onto the client's existing on_line callback
+        self._original_on_line = client._on_line
+        client._on_line = self._intercept_line
+
+    def _intercept_line(self, line: str) -> None:
+        """Capture first line as response if a command is pending."""
+        if self._cmd_lock.locked():
+            self._response_line = line
+            self._response_event.set()
+        elif self._original_on_line:
+            self._original_on_line(line)
+
+    def send_cmd(self, cmd: str) -> Optional[str]:
+        """Send a command and block until a response line is received.
+
+        Returns the response line, or None on timeout.
+        """
+        with self._cmd_lock:
+            self._response_event.clear()
+            self._response_line = None
+            try:
+                self._client.send_line(cmd)
+            except Exception:
+                return None
+            if self._response_event.wait(timeout=self._timeout):
+                return self._response_line
+            return None

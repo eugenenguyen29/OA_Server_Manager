@@ -50,8 +50,10 @@ class GameAdapterRegistry:
 def register_default_adapters() -> None:
     """Register all default game adapters."""
     from core.adapters.amp.adapter import AMPGameAdapter
+    from core.adapters.dota2.adapter import Dota2GameAdapter
     from core.adapters.openarena.adapter import OAGameAdapter
 
     GameAdapterRegistry.register("openarena", OAGameAdapter)
     GameAdapterRegistry.register("amp", AMPGameAdapter)
+    GameAdapterRegistry.register("dota2", Dota2GameAdapter)
     logger.info(f"Registered adapters: {GameAdapterRegistry.get_available_games()}")

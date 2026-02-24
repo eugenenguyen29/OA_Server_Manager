@@ -118,6 +118,13 @@ class TestAdaptersDontDuplicateSyncCommand:
 
         assert AMPGameAdapter.send_command_sync is GameAdapter.send_command_sync
 
+    def test_dota2_adapter_uses_base_implementation(self):
+        """Dota2GameAdapter should inherit send_command_sync from base."""
+        from core.adapters.dota2.adapter import Dota2GameAdapter
+        from core.adapters.base import GameAdapter
+
+        assert Dota2GameAdapter.send_command_sync is GameAdapter.send_command_sync
+
 
 class TestSendCommandSyncIntegration:
     """Integration tests for send_command_sync behavior."""
@@ -148,6 +155,7 @@ class TestSendCommandSyncIntegration:
         """All adapters should have the same send_command_sync behavior."""
         from core.adapters.openarena.adapter import OAGameAdapter
         from core.adapters.amp.adapter import AMPGameAdapter
+        from core.adapters.dota2.adapter import Dota2GameAdapter
         from core.adapters.base import GameAdapterConfig
 
         # Create all adapter types
@@ -155,13 +163,18 @@ class TestSendCommandSyncIntegration:
         amp_config = GameAdapterConfig(
             game_type="amp", host="http://localhost:8080", password="admin:pass"
         )
+        dota2_config = GameAdapterConfig(game_type="dota2", binary_path="/fake/dota2")
 
         oa_adapter = OAGameAdapter(oa_config)
         amp_adapter = AMPGameAdapter(amp_config)
+        dota2_adapter = Dota2GameAdapter(dota2_config)
 
         # All should use the same method implementation
         assert (
             type(oa_adapter).send_command_sync is type(amp_adapter).send_command_sync
+        )
+        assert (
+            type(oa_adapter).send_command_sync is type(dota2_adapter).send_command_sync
         )
 
 

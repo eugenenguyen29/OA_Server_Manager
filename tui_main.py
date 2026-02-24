@@ -29,38 +29,52 @@ async_thread = None
 cleanup_done = False
 
 
+def _build_dota2_config() -> GameAdapterConfig:
+    logger = logging.getLogger(__name__)
+    logger.info(f"[Dota2] Script path: {settings.dota2_script_path}")
+    return GameAdapterConfig(
+        game_type="dota2",
+        binary_path=settings.dota2_script_path,
+        poll_interval=settings.dota2_poll_interval,
+    )
+
+
+def _build_amp_config() -> GameAdapterConfig:
+    amp_user = getattr(settings, "amp_username", None)
+    amp_pass = getattr(settings, "amp_password", None)
+    password = f"{amp_user}:{amp_pass}" if amp_user and amp_pass else None
+    config = GameAdapterConfig(
+        game_type="amp",
+        host=settings.amp_base_url,
+        password=password,
+        poll_interval=settings.amp_poll_interval,
+    )
+    if hasattr(settings, "amp_instance_id"):
+        config.instance_id = settings.amp_instance_id  # type: ignore[attr-defined]
+    return config
+
+
+def _build_openarena_config() -> GameAdapterConfig:
+    return GameAdapterConfig(
+        game_type="openarena",
+        host="localhost",
+        port=settings.oa_port,
+        binary_path=settings.oa_binary_path,
+    )
+
+
+_CONFIG_BUILDERS = {
+    "dota2": _build_dota2_config,
+    "amp": _build_amp_config,
+    "openarena": _build_openarena_config,
+}
+
+
 def _create_adapter() -> GameAdapter:
     """Create the adapter from settings using the registry."""
     game_type = settings.game_type
-
-    if game_type == "dota2":
-        logger = logging.getLogger(__name__)
-        logger.info(f"[Dota2] Script path: {settings.dota2_script_path}")
-        config = GameAdapterConfig(
-            game_type="dota2",
-            binary_path=settings.dota2_script_path,
-            poll_interval=settings.dota2_poll_interval,
-        )
-    elif game_type == "amp":
-        amp_user = getattr(settings, "amp_username", None)
-        amp_pass = getattr(settings, "amp_password", None)
-        password = f"{amp_user}:{amp_pass}" if amp_user and amp_pass else None
-        config = GameAdapterConfig(
-            game_type="amp",
-            host=settings.amp_base_url,
-            password=password,
-            poll_interval=settings.amp_poll_interval,
-        )
-        if hasattr(settings, "amp_instance_id"):
-            config.instance_id = settings.amp_instance_id  # type: ignore[attr-defined]
-    else:  # openarena
-        config = GameAdapterConfig(
-            game_type="openarena",
-            host="localhost",
-            port=settings.oa_port,
-            binary_path=settings.oa_binary_path,
-        )
-
+    builder = _CONFIG_BUILDERS.get(game_type, _build_openarena_config)
+    config = builder()
     return GameAdapterRegistry.create(config)
 
 
@@ -158,10 +172,19 @@ class AdminApp(App):
                         Button("Stop Server", id="kill-server-btn", variant="error"),
                         id="server-control-buttons",
                     ),
+                    Horizontal(
+                        Button("Start Rec", id="obs-rec-btn", variant="warning"),
+                        Button("Start TCP", id="tcp-btn", variant="warning"),
+                        id="module-control-buttons",
+                    ),
                     DataTable(id="user-table"),
                     id="left-panel",
                 ),
-                Vertical(Log(id="app-log", max_lines=2000), Log(id="server-log", max_lines=2000), id="right-panel"),
+                Vertical(
+                    Log(id="app-log", max_lines=2000),
+                    Log(id="server-log", max_lines=2000),
+                    id="right-panel",
+                ),
                 id="content-panel",
             ),
             id="main-container",
@@ -219,6 +242,10 @@ class AdminApp(App):
         self._state_label = self.query_one("#status-state", Label)
         self._round_label = self.query_one("#status-round", Label)
         self._start_btn = self.query_one("#start-server-btn", Button)
+        self._obs_rec_btn = self.query_one("#obs-rec-btn", Button)
+        self._tcp_btn = self.query_one("#tcp-btn", Button)
+        self._obs_recording = False
+        self._tcp_active = False
         self._prev_table_data = []
 
         self._app_log.border_title = "App Logs"
@@ -229,7 +256,7 @@ class AdminApp(App):
 
         self._user_table.border_title = "Connected Users"
         self._user_table.cursor_type = "row"
-        self._user_table.add_columns("ID", "Name", "IP", "OBS", "Action")
+        self._user_table.add_columns("ID", "Name", "IP", "OBS", "TCP", "Action")
 
         handler = TUILogHandler(self._app_log, self)
         handler.setFormatter(
@@ -331,6 +358,7 @@ class AdminApp(App):
 
                 if client_type == "BOT":
                     obs_status = "N/A"
+                    tcp_status = "N/A"
                 else:
                     obs_status = (
                         "+"
@@ -342,8 +370,20 @@ class AdminApp(App):
                         )
                         else "-"
                     )
+                    tcp_status = (
+                        "+"
+                        if (
+                            client_ip
+                            and adapter.tcp_connection_manager.is_client_connected(
+                                client_ip
+                            )
+                        )
+                        else "-"
+                    )
 
-                new_data.append((str(client_id), name, client_ip, obs_status, "Kick"))
+                new_data.append(
+                    (str(client_id), name, client_ip, obs_status, tcp_status, "Kick")
+                )
 
             if new_data != self._prev_table_data:
                 self._prev_table_data = new_data
@@ -382,6 +422,114 @@ class AdminApp(App):
 
         elif event.button.id == "kill-server-btn":
             self._stop_adapter()
+
+        elif event.button.id == "obs-rec-btn":
+            if not self._obs_recording:
+                self._start_obs_recording()
+            else:
+                self._stop_obs_recording()
+
+        elif event.button.id == "tcp-btn":
+            if not self._tcp_active:
+                self._start_tcp()
+            else:
+                self._stop_tcp()
+
+    # ── OBS Recording ─────────────────────────────────────────
+
+    def _start_obs_recording(self):
+        if adapter is None or not adapter.is_connected:
+            logging.warning("Adapter not connected - cannot start recording")
+            return
+
+        async def do_start():
+            try:
+                obs_mgr = adapter.obs_connection_manager.obs_manager
+                results = await obs_mgr.start_all_recordings()
+                started = sum(1 for s in results.values() if s)
+                logging.info(
+                    f"OBS recording started for {started}/{len(results)} clients"
+                )
+                if any(results.values()):
+                    self.call_from_thread(self._set_obs_recording_state, True)
+            except Exception as e:
+                logging.error(f"Failed to start OBS recording: {e}")
+
+        if async_loop and async_loop.is_running():
+            asyncio.run_coroutine_threadsafe(do_start(), async_loop)
+
+    def _stop_obs_recording(self):
+        if adapter is None or not adapter.is_connected:
+            logging.warning("Adapter not connected - cannot stop recording")
+            return
+
+        async def do_stop():
+            try:
+                obs_mgr = adapter.obs_connection_manager.obs_manager
+                results = await obs_mgr.stop_all_recordings()
+                stopped = sum(1 for s in results.values() if s)
+                logging.info(
+                    f"OBS recording stopped for {stopped}/{len(results)} clients"
+                )
+                self.call_from_thread(self._set_obs_recording_state, False)
+            except Exception as e:
+                logging.error(f"Failed to stop OBS recording: {e}")
+
+        if async_loop and async_loop.is_running():
+            asyncio.run_coroutine_threadsafe(do_stop(), async_loop)
+
+    def _set_obs_recording_state(self, recording: bool):
+        self._obs_recording = recording
+        if recording:
+            self._obs_rec_btn.label = "Stop Rec"
+            self._obs_rec_btn.variant = "error"
+        else:
+            self._obs_rec_btn.label = "Start Rec"
+            self._obs_rec_btn.variant = "warning"
+
+    # ── TCP Module ───────────────────────────────────────────
+
+    @work(thread=True)
+    def _start_tcp(self):
+        if adapter is None or not adapter.is_connected:
+            logging.warning("Adapter not connected - cannot start TCP")
+            return
+
+        try:
+            tcp_mgr = adapter.tcp_connection_manager
+            network_mgr = adapter.network_manager
+            count = 0
+            for client_id, client_type in network_mgr.client_type_map.items():
+                if client_type == "HUMAN":
+                    client_ip = network_mgr.client_ip_map.get(client_id)
+                    if client_ip:
+                        tcp_mgr.connect_single_client(client_ip, network_mgr)
+                        count += 1
+            logging.info(f"TCP connections started for {count} human clients")
+            self.call_from_thread(self._set_tcp_state, True)
+        except Exception as e:
+            logging.error(f"Failed to start TCP connections: {e}")
+
+    @work(thread=True)
+    def _stop_tcp(self):
+        if adapter is None:
+            return
+
+        try:
+            adapter.tcp_connection_manager.disconnect_all()
+            logging.info("All TCP connections stopped")
+            self.call_from_thread(self._set_tcp_state, False)
+        except Exception as e:
+            logging.error(f"Failed to stop TCP connections: {e}")
+
+    def _set_tcp_state(self, active: bool):
+        self._tcp_active = active
+        if active:
+            self._tcp_btn.label = "Stop TCP"
+            self._tcp_btn.variant = "error"
+        else:
+            self._tcp_btn.label = "Start TCP"
+            self._tcp_btn.variant = "warning"
 
     def _run_adapter_coro(self, coro) -> None:
         """Schedule an adapter coroutine on the async loop."""

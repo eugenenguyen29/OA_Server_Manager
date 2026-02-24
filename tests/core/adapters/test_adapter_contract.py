@@ -45,12 +45,25 @@ def _make_amp_adapter():
     return AMPGameAdapter(config)
 
 
-@pytest.fixture(params=["oa", "amp"], ids=["OAGameAdapter", "AMPGameAdapter"])
+def _make_dota2_adapter():
+    """Create a Dota2GameAdapter with mocked dependencies."""
+    config = GameAdapterConfig(
+        game_type="dota2",
+        binary_path="/fake/dota2",
+    )
+    from core.adapters.dota2.adapter import Dota2GameAdapter
+
+    return Dota2GameAdapter(config)
+
+
+@pytest.fixture(params=["oa", "amp", "dota2"], ids=["OAGameAdapter", "AMPGameAdapter", "Dota2GameAdapter"])
 def adapter(request):
     """Parametrized fixture yielding each concrete adapter."""
     if request.param == "oa":
         return _make_oa_adapter()
-    return _make_amp_adapter()
+    elif request.param == "amp":
+        return _make_amp_adapter()
+    return _make_dota2_adapter()
 
 
 class TestAdapterContractProperties:
@@ -71,6 +84,10 @@ class TestAdapterContractProperties:
     def test_adapter_has_obs_connection_manager(self, adapter):
         assert hasattr(adapter, "obs_connection_manager")
         assert adapter.obs_connection_manager is not None
+
+    def test_adapter_has_tcp_connection_manager(self, adapter):
+        assert hasattr(adapter, "tcp_connection_manager")
+        assert adapter.tcp_connection_manager is not None
 
     def test_adapter_has_message_processor(self, adapter):
         assert hasattr(adapter, "message_processor")

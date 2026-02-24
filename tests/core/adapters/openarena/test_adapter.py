@@ -211,6 +211,7 @@ class TestOAAdapterKickCallback:
     def test_kick_callback_uses_correct_game_command_oa(self):
         adapter = _make_adapter()
         adapter._network_manager.client_ip_map = {123: "192.168.1.100"}
+        adapter._network_manager._ip_to_client_id = {"192.168.1.100": 123}
 
         with patch.object(adapter, "kick_client", new_callable=AsyncMock) as mock_kick:
             # Set up a fake async loop for run_async

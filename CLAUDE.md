@@ -122,6 +122,9 @@ core/
 - Compositional ownership — each adapter owns its sub-managers (`_network_manager`, `_obs_connection_manager`, etc.)
 - Shutdown strategies use the Strategy pattern, accessing adapter sub-managers for clean teardown
 
+**Textual TUI Threading Rule:**
+- NEVER call blocking disconnect/close operations (e.g. `TCPClient.close()`, `disconnect_all()`) directly from the Textual main thread (button handlers, `action_*` methods, row-select handlers). These operations trigger `on_disconnected` callbacks that call `call_from_thread`, which deadlocks because the main thread is blocked on `_thread.join()`. Always wrap blocking teardown calls in `@work(thread=True)` so they run in a Textual worker thread and the main thread stays free to process callbacks.
+
 **OBS 3-Layer Architecture:**
 ```
 Layer 1: OBSWebSocketClient (controller.py)       — WebSocket 5.x protocol, zero game coupling

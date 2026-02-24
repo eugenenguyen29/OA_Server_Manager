@@ -29,7 +29,15 @@ class DisplayUtils:
             return
 
         # Define headers
-        headers = ["Client ID", "IP Address", "Type", "Latency", "OBS Status", "Name"]
+        headers = [
+            "Client ID",
+            "IP Address",
+            "Type",
+            "Latency",
+            "OBS Status",
+            "TCP Status",
+            "Name",
+        ]
 
         # Create formatted output
         print("\n" + "=" * 80)
