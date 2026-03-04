@@ -51,10 +51,14 @@ class TCPClientManager:
 
         If already connected, disconnects first.
         """
+        old_client: Optional[TCPClient] = None
         with self._lock:
             if client_ip in self._clients:
                 self.logger.info(f"Reconnecting TCP for {client_ip}")
-                self._disconnect_client_unlocked(client_ip)
+                old_client = self._disconnect_client_unlocked(client_ip)
+
+        if old_client:
+            old_client.close()
 
         p = port or self.tcp_port
 
@@ -108,22 +112,25 @@ class TCPClientManager:
     def disconnect_client(self, client_ip: str) -> None:
         """Disconnect and remove a single client."""
         with self._lock:
-            self._disconnect_client_unlocked(client_ip)
-
-    def _disconnect_client_unlocked(self, client_ip: str) -> None:
-        """Internal disconnect — caller must hold self._lock."""
-        client = self._clients.pop(client_ip, None)
-        self._channels.pop(client_ip, None)
+            client = self._disconnect_client_unlocked(client_ip)
         if client:
             client.close()
             self.logger.info(f"TCP client removed: {client_ip}")
+
+    def _disconnect_client_unlocked(self, client_ip: str) -> Optional[TCPClient]:
+        """Pop client from dicts. Caller must hold self._lock. Returns client for closing outside lock."""
+        client = self._clients.pop(client_ip, None)
+        self._channels.pop(client_ip, None)
+        return client
 
     def disconnect_all(self) -> None:
         """Disconnect all TCP clients."""
         with self._lock:
             ips = list(self._clients.keys())
-        for ip in ips:
-            self.disconnect_client(ip)
+            clients = [self._disconnect_client_unlocked(ip) for ip in ips]
+        for client in clients:
+            if client:
+                client.close()
         self.logger.info("All TCP clients disconnected")
 
     def send_to_client(self, client_ip: str, text: str) -> None:

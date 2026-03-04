@@ -258,6 +258,7 @@ class AdminApp(App):
         self._exp_status_label = self.query_one("#exp-status-label", Label)
         self._obs_recording = False
         self._tcp_active = False
+        self._tcp_busy = False
         self._exp_active: Optional[str] = None
         self._prev_table_data = []
 
@@ -474,6 +475,10 @@ class AdminApp(App):
                 self._stop_obs_recording()
 
         elif event.button.id == "tcp-btn":
+            if self._tcp_busy:
+                return
+            self._tcp_busy = True
+            self._tcp_btn.disabled = True
             if not self._tcp_active:
                 self._start_tcp()
             else:
@@ -540,10 +545,15 @@ class AdminApp(App):
 
     # ── TCP Module ───────────────────────────────────────────
 
+    def _set_tcp_busy(self, busy: bool):
+        self._tcp_busy = busy
+        self._tcp_btn.disabled = busy
+
     @work(thread=True)
     def _start_tcp(self):
         if adapter is None or not adapter.is_connected:
             logging.warning("Adapter not connected - cannot start TCP")
+            self.call_from_thread(self._set_tcp_busy, False)
             return
 
         try:
@@ -565,18 +575,27 @@ class AdminApp(App):
             self.call_from_thread(self._set_tcp_state, True)
         except Exception as e:
             logging.error(f"Failed to start TCP connections: {e}")
+            try:
+                adapter.tcp_connection_manager.disconnect_all()
+            except Exception:
+                pass
+        finally:
+            self.call_from_thread(self._set_tcp_busy, False)
 
     @work(thread=True)
     def _stop_tcp(self):
         if adapter is None:
+            self.call_from_thread(self._set_tcp_busy, False)
             return
 
         try:
             adapter.tcp_connection_manager.disconnect_all()
             logging.info("All TCP connections stopped")
-            self.call_from_thread(self._set_tcp_state, False)
         except Exception as e:
             logging.error(f"Failed to stop TCP connections: {e}")
+        finally:
+            self.call_from_thread(self._set_tcp_state, False)
+            self.call_from_thread(self._set_tcp_busy, False)
 
     def _set_tcp_state(self, active: bool):
         self._tcp_active = active
