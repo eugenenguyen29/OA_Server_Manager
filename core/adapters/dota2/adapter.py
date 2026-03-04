@@ -24,6 +24,7 @@ from core.game.game_manager import GameManager
 from core.game.state_manager import GameStateManager
 from core.network.network_manager import NetworkManager
 from core.obs.connection_manager import OBSConnectionManager
+from core.experiment.experiment_manager import ExperimentManager
 from core.tcp.connection_manager import TCPConnectionManager
 from core.server.shutdown_strategies import (
     MatchShutdownStrategy,
@@ -73,6 +74,7 @@ class Dota2GameAdapter(GameAdapter):
             tcp_port=settings.tcp_port,
             send_command_callback=self.send_command_sync,
         )
+        self._experiment_manager = ExperimentManager(self._tcp_connection_manager)
 
         # Shutdown strategies
         self._shutdown_strategies: Dict[str, Any] = {
@@ -132,6 +134,10 @@ class Dota2GameAdapter(GameAdapter):
     @property
     def tcp_connection_manager(self) -> TCPConnectionManager:
         return self._tcp_connection_manager
+
+    @property
+    def experiment_manager(self) -> ExperimentManager:
+        return self._experiment_manager
 
     @property
     def message_processor(self) -> Dota2MessageProcessor:
@@ -299,6 +305,7 @@ class Dota2GameAdapter(GameAdapter):
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown."""
+        self._experiment_manager.stop()
         self._shutdown_event.set()
 
     def is_shutdown_requested(self) -> bool:
@@ -458,9 +465,10 @@ class Dota2GameAdapter(GameAdapter):
                     client_ip, self._network_manager
                 )
             )
-            self._tcp_connection_manager.connect_single_client(
-                client_ip, self._network_manager
-            )
+            if not self._tcp_connection_manager.is_client_connected(client_ip):
+                self._tcp_connection_manager.connect_single_client(
+                    client_ip, self._network_manager
+                )
         elif client_ip == "bot":
             self._network_manager.add_client(
                 client_id=client_id,

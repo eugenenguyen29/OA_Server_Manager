@@ -19,6 +19,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from core.experiment.experiment_manager import ExperimentManager
     from core.game.game_manager import GameManager
     from core.game.state_manager import GameStateManager
     from core.network.network_manager import NetworkManager
@@ -218,6 +219,12 @@ class GameAdapter(ABC):
 
     @property
     @abstractmethod
+    def experiment_manager(self) -> ExperimentManager:
+        """Return the ExperimentManager instance owned by this adapter."""
+        ...
+
+    @property
+    @abstractmethod
     def message_processor(self) -> BaseMessageProcessor:
         """Return the BaseMessageProcessor instance owned by this adapter."""
         ...
@@ -265,10 +272,15 @@ class GameAdapter(ABC):
     def apply_tcp_latencies(
         self, connect_timeout: float = 10.0
     ) -> Dict[str, Optional[str]]:
-        """Wait for TCP connections then send latency assignments."""
-        self.tcp_connection_manager.wait_all_connected(connect_timeout)
+        """Wait for TCP connections then send latency assignments.
+
+        Only sends SET_LATENCY to clients that are actually connected,
+        filtering out any that failed to connect or were removed.
+        """
+        connected = self.tcp_connection_manager.wait_all_connected(connect_timeout)
         latency_map = self.network_manager.get_latency_map()
-        return self.tcp_connection_manager.set_latency_all(latency_map)
+        active_map = {ip: ms for ip, ms in latency_map.items() if connected.get(ip)}
+        return self.tcp_connection_manager.set_latency_all(active_map)
 
     def send_command_sync(self, command: str) -> None:
         """

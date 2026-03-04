@@ -13,6 +13,7 @@ class TCPClientConfig:
     recv_timeout_sec: float = 0.5  # small so loop can notice "off"
     reconnect: bool = True
     reconnect_delay_sec: float = 1.5
+    max_retries: int = 0  # 0 = unlimited when reconnect=True
 
     # protocol details
     hello_line: str = ""  # manager sets per-client value (Bug 5 fix)
@@ -86,6 +87,7 @@ class TCPClient:
             self._thread.start()
 
     def _run_loop(self) -> None:
+        retries = 0
         while not self._stop_event.is_set():
             with self._lock:
                 want_on = self._want_on
@@ -101,11 +103,17 @@ class TCPClient:
                 err = self._connect()
                 if err is not None:
                     if self.cfg.reconnect:
+                        retries += 1
+                        if self.cfg.max_retries > 0 and retries >= self.cfg.max_retries:
+                            with self._lock:
+                                self._want_on = False
+                            continue
                         time.sleep(self.cfg.reconnect_delay_sec)
                         continue
                     with self._lock:
                         self._want_on = False
                     continue
+                retries = 0  # reset on successful connect
 
             # connected: pump incoming lines
             try:
@@ -113,6 +121,11 @@ class TCPClient:
             except Exception as e:
                 self._disconnect(e)
                 if self.cfg.reconnect:
+                    retries += 1
+                    if self.cfg.max_retries > 0 and retries >= self.cfg.max_retries:
+                        with self._lock:
+                            self._want_on = False
+                        continue
                     time.sleep(self.cfg.reconnect_delay_sec)
 
         self._disconnect()
@@ -215,6 +228,7 @@ class CommandChannel:
         self._cmd_lock = threading.Lock()
         self._response_event = threading.Event()
         self._response_line: Optional[str] = None
+        self._awaiting_response = False
 
         # Chain onto the client's existing on_line callback
         self._original_on_line = client._on_line
@@ -222,7 +236,7 @@ class CommandChannel:
 
     def _intercept_line(self, line: str) -> None:
         """Capture first line as response if a command is pending."""
-        if self._cmd_lock.locked():
+        if self._awaiting_response:
             self._response_line = line
             self._response_event.set()
         elif self._original_on_line:
@@ -236,10 +250,12 @@ class CommandChannel:
         with self._cmd_lock:
             self._response_event.clear()
             self._response_line = None
+            self._awaiting_response = True
             try:
                 self._client.send_line(cmd)
             except Exception:
+                self._awaiting_response = False
                 return None
-            if self._response_event.wait(timeout=self._timeout):
-                return self._response_line
-            return None
+            got = self._response_event.wait(timeout=self._timeout)
+            self._awaiting_response = False
+            return self._response_line if got else None

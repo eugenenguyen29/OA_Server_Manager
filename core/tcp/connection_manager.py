@@ -30,10 +30,12 @@ class TCPConnectionManager:
         self,
         tcp_port: int = 5000,
         send_command_callback: Optional[Callable[[str], None]] = None,
+        max_retries: int = 3,
     ):
         self.tcp_manager = TCPClientManager(
             tcp_port=tcp_port,
-            reconnect=False,
+            reconnect=True,
+            max_retries=max_retries,
             on_client_connected=self._on_connected,
             on_client_disconnected=self._on_disconnected,
         )

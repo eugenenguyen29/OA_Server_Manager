@@ -26,6 +26,7 @@ class TCPClientManager:
         tcp_port: int = 5000,
         connect_timeout: float = 5.0,
         reconnect: bool = True,
+        max_retries: int = 0,
         on_client_connected: Optional[Callable[[str], None]] = None,
         on_client_disconnected: Optional[
             Callable[[str, Optional[Exception]], None]
@@ -35,6 +36,7 @@ class TCPClientManager:
         self.tcp_port = tcp_port
         self.connect_timeout = connect_timeout
         self.reconnect = reconnect
+        self.max_retries = max_retries
         self._lock = threading.RLock()  # Bug 3 fix: protect _clients and _channels
         self._clients: Dict[str, TCPClient] = {}
         self._channels: Dict[str, CommandChannel] = {}
@@ -62,15 +64,26 @@ class TCPClientManager:
             port=p,
             connect_timeout_sec=self.connect_timeout,
             reconnect=self.reconnect,
+            max_retries=self.max_retries,
             hello_line=f"HELLO {client_ip}",
         )
 
         def on_connected() -> None:
+            # Guard: skip if a different client has replaced us for this IP
+            with self._lock:
+                current = self._clients.get(client_ip)
+                if current is not None and current is not client:
+                    return
             self.logger.info(f"TCP connected to {client_ip}:{p}")
             if self._on_client_connected:
                 self._on_client_connected(client_ip)
 
         def on_disconnected(err: Optional[Exception]) -> None:
+            # Guard: skip if a different client has replaced us for this IP
+            with self._lock:
+                current = self._clients.get(client_ip)
+                if current is not None and current is not client:
+                    return
             self.logger.info(f"TCP disconnected from {client_ip}: {err}")
             if self._on_client_disconnected:
                 self._on_client_disconnected(client_ip, err)

@@ -4,6 +4,7 @@ import signal
 import sys
 import threading
 from logging.handlers import RotatingFileHandler
+from typing import Optional
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -177,6 +178,13 @@ class AdminApp(App):
                         Button("Start TCP", id="tcp-btn", variant="warning"),
                         id="module-control-buttons",
                     ),
+                    Horizontal(
+                        Button("Start Exp 1", id="exp-1-btn", variant="warning"),
+                        Button("Start Exp 2", id="exp-2-btn", variant="warning"),
+                        Button("Start Exp 3", id="exp-3-btn", variant="warning"),
+                        id="experiment-control-buttons",
+                    ),
+                    Label("", id="exp-status-label"),
                     DataTable(id="user-table"),
                     id="left-panel",
                 ),
@@ -244,8 +252,13 @@ class AdminApp(App):
         self._start_btn = self.query_one("#start-server-btn", Button)
         self._obs_rec_btn = self.query_one("#obs-rec-btn", Button)
         self._tcp_btn = self.query_one("#tcp-btn", Button)
+        self._exp_1_btn = self.query_one("#exp-1-btn", Button)
+        self._exp_2_btn = self.query_one("#exp-2-btn", Button)
+        self._exp_3_btn = self.query_one("#exp-3-btn", Button)
+        self._exp_status_label = self.query_one("#exp-status-label", Label)
         self._obs_recording = False
         self._tcp_active = False
+        self._exp_active: Optional[str] = None
         self._prev_table_data = []
 
         self._app_log.border_title = "App Logs"
@@ -401,12 +414,43 @@ class AdminApp(App):
 
     def setup_periodic_updates(self):
         self.set_interval(2.0, self._periodic_update)
+        self.set_interval(1.0, self._update_experiment_status)
 
     def _periodic_update(self):
         if not cleanup_done:
             self.update_status_display()
             self.update_user_table()
             self.update_start_button()
+
+    def _update_experiment_status(self):
+        if adapter is None or not adapter.is_connected:
+            self._exp_status_label.update("")
+            return
+        try:
+            exp_mgr = adapter.experiment_manager
+            if not exp_mgr.is_active:
+                self._exp_status_label.update("")
+                return
+
+            exp_num = exp_mgr.active_experiment
+            step = exp_mgr.current_latency_step
+            remaining = exp_mgr.seconds_until_next_step
+
+            if step is not None and remaining is not None:
+                idx, lat_ms = step
+                total = exp_mgr.latency_step_count
+                mins = int(remaining) // 60
+                secs = int(remaining) % 60
+                self._exp_status_label.update(
+                    f"Exp {exp_num} | Step {idx + 1}/{total}: {lat_ms}ms "
+                    f"| Next in {mins}:{secs:02d}"
+                )
+            else:
+                self._exp_status_label.update(
+                    f"Exp {exp_num} | Baseline (no latency schedule)"
+                )
+        except NotImplementedError:
+            self._exp_status_label.update("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add-bot-btn":
@@ -434,6 +478,13 @@ class AdminApp(App):
                 self._start_tcp()
             else:
                 self._stop_tcp()
+
+        elif event.button.id in ("exp-1-btn", "exp-2-btn", "exp-3-btn"):
+            exp_num = event.button.id.split("-")[1]  # "1", "2", "3"
+            if self._exp_active is None:
+                self._start_experiment(int(exp_num))
+            elif self._exp_active == exp_num:
+                self._stop_experiment()
 
     # ── OBS Recording ─────────────────────────────────────────
 
@@ -499,10 +550,12 @@ class AdminApp(App):
             tcp_mgr = adapter.tcp_connection_manager
             network_mgr = adapter.network_manager
             count = 0
-            for client_id, client_type in network_mgr.client_type_map.items():
+            # Snapshot to avoid RuntimeError from dict mutation during iteration
+            client_items = list(network_mgr.client_type_map.items())
+            for client_id, client_type in client_items:
                 if client_type == "HUMAN":
                     client_ip = network_mgr.client_ip_map.get(client_id)
-                    if client_ip:
+                    if client_ip and not tcp_mgr.is_client_connected(client_ip):
                         tcp_mgr.connect_single_client(client_ip, network_mgr)
                         count += 1
             logging.info(f"TCP connections started for {count} human clients")
@@ -533,6 +586,61 @@ class AdminApp(App):
         else:
             self._tcp_btn.label = "Start TCP"
             self._tcp_btn.variant = "warning"
+
+    # ── Experiment Controls ──────────────────────────────────
+
+    @work(thread=True)
+    def _start_experiment(self, exp_num: int):
+        if adapter is None or not adapter.is_connected:
+            logging.warning("Adapter not connected - cannot start experiment")
+            return
+
+        if not self._tcp_active:
+            logging.warning("TCP not active - start TCP connections first")
+            return
+
+        try:
+            if adapter.experiment_manager.start(exp_num):
+                self.call_from_thread(self._set_exp_state, str(exp_num))
+            else:
+                logging.warning(f"Experiment {exp_num} could not start")
+        except Exception as e:
+            logging.error(f"Failed to start experiment {exp_num}: {e}")
+
+    @work(thread=True)
+    def _stop_experiment(self):
+        if adapter is None:
+            return
+
+        try:
+            adapter.experiment_manager.stop()
+        except Exception as e:
+            logging.error(f"Failed to stop experiment: {e}")
+        # Always reset TUI state to prevent stuck buttons
+        self.call_from_thread(self._set_exp_state, None)
+
+    def _set_exp_state(self, exp_num: Optional[str]):
+        """Update experiment button states. Called from main thread."""
+        self._exp_active = exp_num
+        btn_map = {
+            "1": self._exp_1_btn,
+            "2": self._exp_2_btn,
+            "3": self._exp_3_btn,
+        }
+        for num, btn in btn_map.items():
+            if exp_num is None:
+                # No experiment active — all buttons reset
+                btn.label = f"Start Exp {num}"
+                btn.variant = "warning"
+                btn.disabled = False
+            elif num == exp_num:
+                # This experiment is active — show stop
+                btn.label = f"Stop Exp {num}"
+                btn.variant = "error"
+                btn.disabled = False
+            else:
+                # Another experiment is active — disable
+                btn.disabled = True
 
     def _run_adapter_coro(self, coro) -> None:
         """Schedule an adapter coroutine on the async loop."""
