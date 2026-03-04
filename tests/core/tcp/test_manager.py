@@ -16,11 +16,7 @@ class TestBug3_ThreadSafety:
 
         def connect_worker(ip):
             try:
-                with patch(
-                    "core.tcp.client.socket.create_connection",
-                    side_effect=OSError("refused"),
-                ):
-                    mgr.connect_client(ip)
+                mgr.connect_client(ip)
             except Exception as e:
                 errors.append(e)
 
@@ -37,10 +33,19 @@ class TestBug3_ThreadSafety:
             t2 = threading.Thread(target=disconnect_worker, args=(ip,), daemon=True)
             threads.extend([t1, t2])
 
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5.0)
+        # Apply patch once at the test level — concurrent per-thread patching
+        # is not thread-safe and can leave socket.create_connection permanently
+        # replaced with a mock.
+        with patch(
+            "core.tcp.client.socket.create_connection",
+            side_effect=OSError("refused"),
+        ):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5.0)
+
+        mgr.disconnect_all()
 
         assert len(errors) == 0, f"Got errors: {errors}"
 
