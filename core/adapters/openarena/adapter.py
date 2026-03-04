@@ -23,6 +23,7 @@ from core.game.game_manager import GameManager
 from core.game.state_manager import GameStateManager
 from core.network.network_manager import NetworkManager
 from core.obs.connection_manager import OBSConnectionManager
+from core.experiment.experiment_manager import ExperimentManager
 from core.tcp.connection_manager import TCPConnectionManager
 from core.server.shutdown_strategies import (
     MatchShutdownStrategy,
@@ -135,6 +136,10 @@ class OAGameAdapter(GameAdapter):
     @property
     def tcp_connection_manager(self) -> TCPConnectionManager:
         return self._tcp_connection_manager
+
+    @property
+    def experiment_manager(self) -> ExperimentManager:
+        raise NotImplementedError("ExperimentManager not supported for OpenArena")
 
     @property
     def message_processor(self) -> OAMessageProcessor:

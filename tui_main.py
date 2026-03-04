@@ -175,7 +175,8 @@ class AdminApp(App):
                     ),
                     Horizontal(
                         Button("Start Rec", id="obs-rec-btn", variant="warning"),
-                        Button("Start TCP", id="tcp-btn", variant="warning"),
+                        Button("Connect TCP", id="tcp-connect-btn", variant="warning"),
+                        Button("Stop TCP", id="tcp-stop-btn", variant="error"),
                         id="module-control-buttons",
                     ),
                     Horizontal(
@@ -251,13 +252,13 @@ class AdminApp(App):
         self._round_label = self.query_one("#status-round", Label)
         self._start_btn = self.query_one("#start-server-btn", Button)
         self._obs_rec_btn = self.query_one("#obs-rec-btn", Button)
-        self._tcp_btn = self.query_one("#tcp-btn", Button)
+        self._tcp_connect_btn = self.query_one("#tcp-connect-btn", Button)
+        self._tcp_stop_btn = self.query_one("#tcp-stop-btn", Button)
         self._exp_1_btn = self.query_one("#exp-1-btn", Button)
         self._exp_2_btn = self.query_one("#exp-2-btn", Button)
         self._exp_3_btn = self.query_one("#exp-3-btn", Button)
         self._exp_status_label = self.query_one("#exp-status-label", Label)
         self._obs_recording = False
-        self._tcp_active = False
         self._tcp_busy = False
         self._adapter_busy = False
         self._obs_rec_busy = False
@@ -486,15 +487,19 @@ class AdminApp(App):
             else:
                 self._stop_obs_recording()
 
-        elif event.button.id == "tcp-btn":
+        elif event.button.id == "tcp-connect-btn":
             if self._tcp_busy:
                 return
             self._tcp_busy = True
-            self._tcp_btn.disabled = True
-            if not self._tcp_active:
-                self._start_tcp()
-            else:
-                self._stop_tcp()
+            self._tcp_connect_btn.disabled = True
+            self._start_tcp()
+
+        elif event.button.id == "tcp-stop-btn":
+            if self._tcp_busy:
+                return
+            self._tcp_busy = True
+            self._tcp_stop_btn.disabled = True
+            self._stop_tcp()
 
         elif event.button.id in ("exp-1-btn", "exp-2-btn", "exp-3-btn"):
             exp_num = event.button.id.split("-")[1]  # "1", "2", "3"
@@ -573,7 +578,8 @@ class AdminApp(App):
 
     def _set_tcp_busy(self, busy: bool):
         self._tcp_busy = busy
-        self._tcp_btn.disabled = busy
+        self._tcp_connect_btn.disabled = busy
+        self._tcp_stop_btn.disabled = busy
 
     @work(thread=True)
     def _start_tcp(self):
@@ -594,10 +600,6 @@ class AdminApp(App):
                         tcp_mgr.connect_single_client(client_ip, network_mgr)
                         count += 1
             logging.info(f"TCP connections started for {count} human clients")
-            results = adapter.apply_tcp_latencies()
-            applied = sum(1 for r in results.values() if r is not None)
-            logging.info(f"TCP latencies applied to {applied}/{len(results)} clients")
-            self.call_from_thread(self._set_tcp_state, True)
         except Exception as e:
             logging.error(f"Failed to start TCP connections: {e}")
             try:
@@ -619,17 +621,7 @@ class AdminApp(App):
         except Exception as e:
             logging.error(f"Failed to stop TCP connections: {e}")
         finally:
-            self.call_from_thread(self._set_tcp_state, False)
             self.call_from_thread(self._set_tcp_busy, False)
-
-    def _set_tcp_state(self, active: bool):
-        self._tcp_active = active
-        if active:
-            self._tcp_btn.label = "Stop TCP"
-            self._tcp_btn.variant = "error"
-        else:
-            self._tcp_btn.label = "Start TCP"
-            self._tcp_btn.variant = "warning"
 
     # ── Experiment Controls ──────────────────────────────────
 
@@ -637,10 +629,6 @@ class AdminApp(App):
     def _start_experiment(self, exp_num: int):
         if adapter is None or not adapter.is_connected:
             logging.warning("Adapter not connected - cannot start experiment")
-            return
-
-        if not self._tcp_active:
-            logging.warning("TCP not active - start TCP connections first")
             return
 
         try:
