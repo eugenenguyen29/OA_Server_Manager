@@ -259,6 +259,8 @@ class AdminApp(App):
         self._obs_recording = False
         self._tcp_active = False
         self._tcp_busy = False
+        self._adapter_busy = False
+        self._obs_rec_busy = False
         self._exp_active: Optional[str] = None
         self._prev_table_data = []
 
@@ -364,11 +366,12 @@ class AdminApp(App):
                 return
 
             network_mgr = adapter.network_manager
+            snapshot = network_mgr.get_snapshot()
             new_data = []
 
-            for client_id, client_type in network_mgr.client_type_map.items():
-                name = network_mgr.client_name_map.get(client_id, f"Client_{client_id}")
-                client_ip = network_mgr.client_ip_map.get(client_id, "N/A")
+            for client_id, client_type in snapshot['client_type_map'].items():
+                name = snapshot['client_name_map'].get(client_id, f"Client_{client_id}")
+                client_ip = snapshot['client_ip_map'].get(client_id, "N/A")
 
                 if client_type == "BOT":
                     obs_status = "N/A"
@@ -463,12 +466,21 @@ class AdminApp(App):
             logging.info("All bots removal requested")
 
         elif event.button.id == "start-server-btn":
+            self._start_btn.disabled = True
             self.start_adapter_worker()
 
         elif event.button.id == "kill-server-btn":
+            if self._adapter_busy:
+                return
+            self._adapter_busy = True
+            self.query_one("#kill-server-btn", Button).disabled = True
             self._stop_adapter()
 
         elif event.button.id == "obs-rec-btn":
+            if self._obs_rec_busy:
+                return
+            self._obs_rec_busy = True
+            self._obs_rec_btn.disabled = True
             if not self._obs_recording:
                 self._start_obs_recording()
             else:
@@ -496,6 +508,7 @@ class AdminApp(App):
     def _start_obs_recording(self):
         if adapter is None or not adapter.is_connected:
             logging.warning("Adapter not connected - cannot start recording")
+            self._reset_obs_rec_busy()
             return
 
         async def do_start():
@@ -510,6 +523,8 @@ class AdminApp(App):
                     self.call_from_thread(self._set_obs_recording_state, True)
             except Exception as e:
                 logging.error(f"Failed to start OBS recording: {e}")
+            finally:
+                self.call_from_thread(self._reset_obs_rec_busy)
 
         if async_loop and async_loop.is_running():
             asyncio.run_coroutine_threadsafe(do_start(), async_loop)
@@ -517,6 +532,7 @@ class AdminApp(App):
     def _stop_obs_recording(self):
         if adapter is None or not adapter.is_connected:
             logging.warning("Adapter not connected - cannot stop recording")
+            self._reset_obs_rec_busy()
             return
 
         async def do_stop():
@@ -530,6 +546,8 @@ class AdminApp(App):
                 self.call_from_thread(self._set_obs_recording_state, False)
             except Exception as e:
                 logging.error(f"Failed to stop OBS recording: {e}")
+            finally:
+                self.call_from_thread(self._reset_obs_rec_busy)
 
         if async_loop and async_loop.is_running():
             asyncio.run_coroutine_threadsafe(do_stop(), async_loop)
@@ -543,7 +561,15 @@ class AdminApp(App):
             self._obs_rec_btn.label = "Start Rec"
             self._obs_rec_btn.variant = "warning"
 
+    def _reset_obs_rec_busy(self):
+        self._obs_rec_busy = False
+        self._obs_rec_btn.disabled = False
+
     # ── TCP Module ───────────────────────────────────────────
+
+    def _reset_adapter_busy(self):
+        self._adapter_busy = False
+        self.query_one("#kill-server-btn", Button).disabled = False
 
     def _set_tcp_busy(self, busy: bool):
         self._tcp_busy = busy
@@ -559,12 +585,11 @@ class AdminApp(App):
         try:
             tcp_mgr = adapter.tcp_connection_manager
             network_mgr = adapter.network_manager
+            snapshot = network_mgr.get_snapshot()
             count = 0
-            # Snapshot to avoid RuntimeError from dict mutation during iteration
-            client_items = list(network_mgr.client_type_map.items())
-            for client_id, client_type in client_items:
+            for client_id, client_type in snapshot['client_type_map'].items():
                 if client_type == "HUMAN":
-                    client_ip = network_mgr.client_ip_map.get(client_id)
+                    client_ip = snapshot['client_ip_map'].get(client_id)
                     if client_ip and not tcp_mgr.is_client_connected(client_ip):
                         tcp_mgr.connect_single_client(client_ip, network_mgr)
                         count += 1
@@ -669,24 +694,29 @@ class AdminApp(App):
         if async_loop and async_loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, async_loop)
 
+    @work(thread=True)
     def _stop_adapter(self):
         """Stop/disconnect the adapter."""
         if adapter is None:
+            self.call_from_thread(self._reset_adapter_busy)
             return
 
-        adapter.request_shutdown()
+        try:
+            adapter.request_shutdown()
 
-        async def do_disconnect():
-            try:
-                await adapter.disconnect()
-                logging.info("Adapter disconnected")
-            except Exception as e:
-                logging.error(f"Adapter disconnect error: {e}")
+            async def do_disconnect():
+                try:
+                    await adapter.disconnect()
+                    logging.info("Adapter disconnected")
+                except Exception as e:
+                    logging.error(f"Adapter disconnect error: {e}")
 
-        if async_loop and async_loop.is_running():
-            asyncio.run_coroutine_threadsafe(do_disconnect(), async_loop)
+            if async_loop and async_loop.is_running():
+                asyncio.run_coroutine_threadsafe(do_disconnect(), async_loop)
 
-        self.update_user_table()
+            self.call_from_thread(self.update_user_table)
+        finally:
+            self.call_from_thread(self._reset_adapter_busy)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "user-table":

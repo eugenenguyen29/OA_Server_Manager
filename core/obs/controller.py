@@ -16,7 +16,8 @@ class OBSWebSocketClient:
     """
 
     def __init__(
-        self, host: str = "localhost", port: int = 4455, password: Optional[str] = None
+        self, host: str = "localhost", port: int = 4455, password: Optional[str] = None,
+        on_disconnected: Optional[Any] = None,
     ):
         self.host = host
         self.port = port
@@ -26,6 +27,7 @@ class OBSWebSocketClient:
         self.logger = logging.getLogger(__name__)
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._on_disconnected = on_disconnected
 
     async def connect(self) -> bool:
         """Connect to OBS WebSocket server."""
@@ -123,9 +125,17 @@ class OBSWebSocketClient:
                 except websockets.ConnectionClosed:
                     break
                 except Exception:
+                    self.logger.exception("Error in OBS message reader")
                     continue
         except Exception:
-            pass
+            self.logger.exception("Unexpected error in OBS message reader loop")
+        finally:
+            self.logger.info(f"OBS message reader exited for {self.host}")
+            if self._on_disconnected:
+                try:
+                    self._on_disconnected()
+                except Exception:
+                    self.logger.exception("Error in on_disconnected callback")
 
     async def send_request(
         self, request_type: str, request_data: Optional[Dict] = None

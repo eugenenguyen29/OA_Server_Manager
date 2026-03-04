@@ -8,6 +8,7 @@ OBSManager pattern for multi-client connection pooling.
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional
 
 from core.tcp.client import CommandChannel, TCPClient, TCPClientConfig
@@ -162,20 +163,20 @@ class TCPClientManager:
             return None
         return channel.send_cmd(cmd)
 
-    def broadcast_cmd(self, cmd: str) -> Dict[str, Optional[str]]:
+    def broadcast_cmd(self, cmd: str, timeout: float = 5.0) -> Dict[str, Optional[str]]:
         """Send a command to all clients and collect responses.
 
         Removes dead connections that fail to respond.
+        Uses ThreadPoolExecutor for parallel execution.
         """
         with self._lock:
             snapshot = dict(self._channels)
-        results: Dict[str, Optional[str]] = {}
-        dead: List[str] = []
-        for ip, channel in snapshot.items():
-            resp = channel.send_cmd(cmd)
-            results[ip] = resp
-            if resp is None:
-                dead.append(ip)
+        if not snapshot:
+            return {}
+        with ThreadPoolExecutor(max_workers=len(snapshot)) as pool:
+            futures = {ip: pool.submit(ch.send_cmd, cmd) for ip, ch in snapshot.items()}
+            results = {ip: fut.result() for ip, fut in futures.items()}
+        dead = [ip for ip, resp in results.items() if resp is None]
         for ip in dead:
             self.logger.warning(f"TCP client {ip} unresponsive, removing")
             self.disconnect_client(ip)

@@ -18,6 +18,8 @@ class OBSManager:
         obs_port: int = 4455,
         obs_password: Optional[str] = None,
         connection_timeout: int = 30,
+        max_retries: int = 3,
+        reconnect_delay: float = 2.0,
     ):
         """
         Initialize OBS Manager.
@@ -26,11 +28,17 @@ class OBSManager:
             obs_port: Default OBS WebSocket port
             obs_password: OBS WebSocket password (if configured)
             connection_timeout: Timeout in seconds for connection attempts
+            max_retries: Max reconnection attempts on unexpected disconnect (0=disabled)
+            reconnect_delay: Seconds between reconnection attempts
         """
         self.obs_port = obs_port
         self.obs_password = obs_password
         self.connection_timeout = connection_timeout
+        self.max_retries = max_retries
+        self.reconnect_delay = reconnect_delay
         self.obs_clients: Dict[str, OBSWebSocketClient] = {}
+        self._reconnect_tasks: Dict[str, asyncio.Task] = {}
+        self._shutting_down = False
         self.logger = logging.getLogger(__name__)
 
     async def connect_client_obs(
@@ -57,7 +65,29 @@ class OBSManager:
             self.logger.info(f"Attempting OBS connection to {client_ip}:{port}")
 
             # Create OBS client instance
-            obs_client = OBSWebSocketClient(host=client_ip, port=port, password=pwd)
+            def _on_client_disconnected():
+                if client_ip in self.obs_clients:
+                    del self.obs_clients[client_ip]
+                    self.logger.warning(f"OBS client {client_ip} disconnected (reader exited)")
+                    # Schedule reconnection if not shutting down
+                    if (
+                        not self._shutting_down
+                        and self.max_retries > 0
+                        and client_ip not in self._reconnect_tasks
+                    ):
+                        try:
+                            loop = asyncio.get_event_loop()
+                            task = loop.create_task(
+                                self._reconnect_client(client_ip, port, pwd)
+                            )
+                            self._reconnect_tasks[client_ip] = task
+                        except RuntimeError:
+                            pass  # No event loop running
+
+            obs_client = OBSWebSocketClient(
+                host=client_ip, port=port, password=pwd,
+                on_disconnected=_on_client_disconnected,
+            )
 
             # Attempt connection with timeout
             connected = await asyncio.wait_for(
@@ -91,6 +121,31 @@ class OBSManager:
             )
             return False
 
+    async def _reconnect_client(
+        self, client_ip: str, port: int, password: Optional[str]
+    ) -> None:
+        """Attempt to reconnect a dropped OBS client up to max_retries times."""
+        for attempt in range(1, self.max_retries + 1):
+            if self._shutting_down:
+                break
+            self.logger.info(
+                f"OBS reconnecting to {client_ip} "
+                f"(attempt {attempt}/{self.max_retries})"
+            )
+            await asyncio.sleep(self.reconnect_delay)
+            if self._shutting_down:
+                break
+            connected = await self.connect_client_obs(client_ip, port, password)
+            if connected:
+                self.logger.info(f"OBS reconnected to {client_ip}")
+                self._reconnect_tasks.pop(client_ip, None)
+                return
+        self.logger.warning(
+            f"OBS reconnection failed for {client_ip} "
+            f"after {self.max_retries} attempts"
+        )
+        self._reconnect_tasks.pop(client_ip, None)
+
     async def connect_all_clients(
         self, client_ips: List[str], timeout: Optional[int] = None
     ) -> Dict[str, bool]:
@@ -113,13 +168,19 @@ class OBSManager:
         tasks = [self.connect_client_obs(ip) for ip in client_ips]
 
         # Execute all connections in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=False)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Map results to IPs
-        connection_results = dict(zip(client_ips, results))
+        # Map results to IPs, treating exceptions as False
+        connection_results = {}
+        for ip, result in zip(client_ips, results):
+            if isinstance(result, Exception):
+                self.logger.error(f"OBS connection error for {ip}: {result}")
+                connection_results[ip] = False
+            else:
+                connection_results[ip] = result
 
         # Log summary
-        connected_count = sum(1 for success in results if success)
+        connected_count = sum(1 for success in connection_results.values() if success)
         self.logger.info(
             f"OBS connections: {connected_count}/{len(client_ips)} successful"
         )
@@ -187,11 +248,17 @@ class OBSManager:
 
         tasks = [self.start_recording(ip) for ip in self.obs_clients.keys()]
 
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        recording_results = dict(zip(self.obs_clients.keys(), results))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        recording_results = {}
+        for ip, result in zip(list(self.obs_clients.keys()), results):
+            if isinstance(result, Exception):
+                self.logger.error(f"OBS recording start error for {ip}: {result}")
+                recording_results[ip] = False
+            else:
+                recording_results[ip] = result
 
         # Log summary
-        success_count = sum(1 for success in results if success)
+        success_count = sum(1 for success in recording_results.values() if success)
         self.logger.info(
             f"Recording started: {success_count}/{len(self.obs_clients)} successful"
         )
@@ -209,11 +276,17 @@ class OBSManager:
 
         tasks = [self.stop_recording(ip) for ip in self.obs_clients.keys()]
 
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        recording_results = dict(zip(self.obs_clients.keys(), results))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        recording_results = {}
+        for ip, result in zip(list(self.obs_clients.keys()), results):
+            if isinstance(result, Exception):
+                self.logger.error(f"OBS recording stop error for {ip}: {result}")
+                recording_results[ip] = False
+            else:
+                recording_results[ip] = result
 
         # Log summary
-        success_count = sum(1 for success in results if success)
+        success_count = sum(1 for success in recording_results.values() if success)
         self.logger.info(
             f"Recording stopped: {success_count}/{len(self.obs_clients)} successful"
         )
@@ -250,8 +323,14 @@ class OBSManager:
         """
         tasks = [self.get_recording_status(ip) for ip in self.obs_clients.keys()]
 
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-        status_results = dict(zip(self.obs_clients.keys(), results))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        status_results = {}
+        for ip, result in zip(list(self.obs_clients.keys()), results):
+            if isinstance(result, Exception):
+                self.logger.error(f"OBS status check error for {ip}: {result}")
+                status_results[ip] = {"connected": False, "error": str(result)}
+            else:
+                status_results[ip] = result
 
         return status_results
 
@@ -262,17 +341,32 @@ class OBSManager:
         Args:
             client_ip: IP address of the client to disconnect
         """
-        if client_ip in self.obs_clients:
+        # Cancel any pending reconnection
+        task = self._reconnect_tasks.pop(client_ip, None)
+        if task:
+            task.cancel()
+        # Pop before disconnect so on_disconnected callback won't trigger reconnection
+        client = self.obs_clients.pop(client_ip, None)
+        if client:
             try:
-                await self.obs_clients[client_ip].disconnect()
-                del self.obs_clients[client_ip]
+                await client.disconnect()
                 self.logger.info(f"Disconnected OBS client: {client_ip}")
             except Exception as e:
                 self.logger.error(f"Error disconnecting {client_ip}: {e}")
 
     async def disconnect_all(self) -> None:
         """Disconnect all OBS clients."""
+        self._shutting_down = True
         self.logger.info(f"Disconnecting {len(self.obs_clients)} OBS clients")
+
+        # Cancel all pending reconnection tasks
+        for task in self._reconnect_tasks.values():
+            task.cancel()
+        if self._reconnect_tasks:
+            await asyncio.gather(
+                *self._reconnect_tasks.values(), return_exceptions=True
+            )
+        self._reconnect_tasks.clear()
 
         tasks = [self.disconnect_client(ip) for ip in list(self.obs_clients.keys())]
 

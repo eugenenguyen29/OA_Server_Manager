@@ -195,8 +195,11 @@ class OBSConnectionManager:
     async def cleanup_all(self):
         """Clean up all OBS connections and tasks."""
         try:
-            for task in self._connection_tasks.values():
+            tasks = list(self._connection_tasks.values())
+            for task in tasks:
                 task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             self._connection_tasks.clear()
 
             await self.obs_manager.disconnect_all()
