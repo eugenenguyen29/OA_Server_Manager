@@ -158,6 +158,8 @@ class TCPClient:
                 timeout=self.cfg.connect_timeout_sec,
             )
             sock.settimeout(self.cfg.recv_timeout_sec)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
             # Send HELLO BEFORE assigning to self._sock (Bug 1 fix)
             if self.cfg.auto_hello and self.cfg.hello_line:

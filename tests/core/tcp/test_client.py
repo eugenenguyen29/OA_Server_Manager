@@ -302,3 +302,29 @@ class TestZombieThreadCleanup:
             client._thread.join(timeout=3.0)
 
         assert not client._thread.is_alive(), "Thread should have exited (reconnect=False)"
+
+
+# ---------------------------------------------------------------------------
+# Socket options: TCP_NODELAY and SO_KEEPALIVE
+# ---------------------------------------------------------------------------
+class TestSocketOptions:
+    def test_connect_sets_tcp_nodelay_and_keepalive(self):
+        """TCP_NODELAY and SO_KEEPALIVE must be set on new connections."""
+        cfg = TCPClientConfig(
+            host="127.0.0.1", port=9999, reconnect=False, auto_hello=False
+        )
+        client = TCPClient(cfg)
+        fake_sock = MagicMock(spec=socket.socket)
+
+        with patch("core.tcp.client.socket.create_connection", return_value=fake_sock):
+            err = client._connect()
+
+        assert err is None
+        fake_sock.setsockopt.assert_any_call(
+            socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+        )
+        fake_sock.setsockopt.assert_any_call(
+            socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1
+        )
+        # Should be exactly 2 setsockopt calls -- no platform-specific tuning
+        assert fake_sock.setsockopt.call_count == 2
