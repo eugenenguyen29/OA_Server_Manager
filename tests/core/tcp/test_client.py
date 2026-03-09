@@ -5,12 +5,38 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from core.tcp.client import CommandChannel, TCPClient, TCPClientConfig
 
 
 # ---------------------------------------------------------------------------
 # Bug 1 regression: socket not assigned if HELLO send fails
 # ---------------------------------------------------------------------------
+class TestSendLineRace:
+    def test_send_line_during_disconnect_raises_runtime_error(self):
+        """send_line must raise RuntimeError (not OSError) if socket closes mid-send."""
+        cfg = TCPClientConfig(host="127.0.0.1", port=9999, reconnect=False)
+        client = TCPClient(cfg)
+
+        fake_sock = MagicMock(spec=socket.socket)
+        fake_sock.sendall.side_effect = OSError("Transport endpoint is not connected")
+        client._sock = fake_sock
+
+        with pytest.raises(RuntimeError, match="Not connected"):
+            client.send_line("PING")
+
+    def test_send_line_succeeds_when_connected(self):
+        """send_line sends data correctly when connected."""
+        cfg = TCPClientConfig(host="127.0.0.1", port=9999, reconnect=False)
+        client = TCPClient(cfg)
+        fake_sock = MagicMock(spec=socket.socket)
+        client._sock = fake_sock
+
+        client.send_line("HELLO")
+        fake_sock.sendall.assert_called_once_with(b"HELLO\n")
+
+
 class TestBug1_AtomicConnect:
     def test_socket_not_assigned_if_hello_fails(self):
         """If HELLO sendall raises, self._sock must remain None."""

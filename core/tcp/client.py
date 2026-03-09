@@ -75,7 +75,10 @@ class TCPClient:
             sock = self._sock
         if not sock:
             raise RuntimeError("Not connected")
-        sock.sendall(data)
+        try:
+            sock.sendall(data)
+        except OSError as e:
+            raise RuntimeError("Not connected") from e
 
     # ---------- internals ----------
     def _ensure_thread(self) -> None:
