@@ -166,8 +166,8 @@ class TCPClientManager:
     def broadcast_cmd(self, cmd: str, timeout: float = 5.0) -> Dict[str, Optional[str]]:
         """Send a command to all clients and collect responses.
 
-        Removes dead connections that fail to respond.
         Uses ThreadPoolExecutor for parallel execution.
+        Callers can inspect None values to decide how to handle unresponsive clients.
         """
         with self._lock:
             snapshot = dict(self._channels)
@@ -176,10 +176,9 @@ class TCPClientManager:
         with ThreadPoolExecutor(max_workers=len(snapshot)) as pool:
             futures = {ip: pool.submit(ch.send_cmd, cmd) for ip, ch in snapshot.items()}
             results = {ip: fut.result() for ip, fut in futures.items()}
-        dead = [ip for ip, resp in results.items() if resp is None]
-        for ip in dead:
-            self.logger.warning(f"TCP client {ip} unresponsive, removing")
-            self.disconnect_client(ip)
+        for ip, resp in results.items():
+            if resp is None:
+                self.logger.warning(f"TCP client {ip} unresponsive to broadcast cmd")
         return results
 
     def wait_all_connected(self, timeout: float = 10.0) -> Dict[str, bool]:

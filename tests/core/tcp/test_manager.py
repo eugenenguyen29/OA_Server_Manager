@@ -92,8 +92,8 @@ class TestBroadcastCmd:
         results = mgr.broadcast_cmd("PING")
         assert results == {"10.0.0.1": "OK", "10.0.0.2": "OK"}
 
-    def test_broadcast_cmd_removes_dead_connections(self):
-        """broadcast_cmd removes clients that return None (timeout)."""
+    def test_broadcast_cmd_keeps_unresponsive_clients(self):
+        """broadcast_cmd keeps clients that return None (no auto-removal)."""
         mgr = TCPClientManager(tcp_port=9999, reconnect=False)
 
         ch_alive = MagicMock(spec=CommandChannel)
@@ -115,9 +115,9 @@ class TestBroadcastCmd:
         assert results["10.0.0.1"] == "OK"
         assert results["10.0.0.2"] is None
 
-        # Dead client should be removed
+        # Unresponsive client should still be in _clients (NOT removed)
         with mgr._lock:
-            assert "10.0.0.2" not in mgr._clients
+            assert "10.0.0.2" in mgr._clients
             assert "10.0.0.1" in mgr._clients
 
 

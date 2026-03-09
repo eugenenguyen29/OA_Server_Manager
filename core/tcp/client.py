@@ -88,6 +88,7 @@ class TCPClient:
 
     def _run_loop(self) -> None:
         retries = 0
+        last_err: Optional[Exception] = None
         while not self._stop_event.is_set():
             with self._lock:
                 want_on = self._want_on
@@ -107,11 +108,16 @@ class TCPClient:
                         if self.cfg.max_retries > 0 and retries >= self.cfg.max_retries:
                             with self._lock:
                                 self._want_on = False
+                            self._stop_event.set()
+                            last_err = err
                             continue
                         time.sleep(self.cfg.reconnect_delay_sec)
                         continue
+                    # reconnect=False: give up immediately
                     with self._lock:
                         self._want_on = False
+                    self._stop_event.set()
+                    last_err = err
                     continue
                 retries = 0  # reset on successful connect
 
@@ -125,10 +131,20 @@ class TCPClient:
                     if self.cfg.max_retries > 0 and retries >= self.cfg.max_retries:
                         with self._lock:
                             self._want_on = False
+                        self._stop_event.set()
                         continue
                     time.sleep(self.cfg.reconnect_delay_sec)
 
         self._disconnect()
+
+        # If retries were exhausted before ever connecting, _disconnect()
+        # won't fire the callback (sock is None).  Notify the manager so
+        # it can clean up the zombie entry.
+        if last_err is not None and self._on_disconnected:
+            with self._lock:
+                still_none = self._sock is None
+            if still_none:
+                self._on_disconnected(last_err)
 
     def _connect(self) -> Optional[Exception]:
         """Atomic connect + handshake. Only assigns self._sock on full success."""

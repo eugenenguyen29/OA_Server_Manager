@@ -442,7 +442,19 @@ class Dota2GameAdapter(GameAdapter):
         client_ip = client_data.get("ip", "")
 
         if client_id in self._network_manager.client_type_map:
-            self.logger.debug(f"[CLIENT] Client {client_id} already tracked")
+            # Already tracked — but TCP might have failed after exhausting
+            # max_retries. Re-attempt if the client's TCP is not active.
+            client_ip = self._network_manager.get_client_ip(client_id)
+            if client_ip and not self._tcp_connection_manager.is_client_connected(
+                client_ip
+            ):
+                self.logger.debug(
+                    f"[TCP] Re-attempting TCP for tracked client {client_id} "
+                    f"(IP={client_ip})"
+                )
+                self._tcp_connection_manager.connect_single_client(
+                    client_ip, self._network_manager
+                )
             return
 
         if client_ip and client_ip != "bot":

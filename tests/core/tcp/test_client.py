@@ -202,3 +202,77 @@ class TestCommandChannel:
         # Simulate a line arriving when no command is pending
         channel._intercept_line("UNSOLICITED MESSAGE")
         assert received == ["UNSOLICITED MESSAGE"]
+
+
+# ---------------------------------------------------------------------------
+# Zombie thread cleanup: thread must exit and fire callback after retries
+# ---------------------------------------------------------------------------
+class TestZombieThreadCleanup:
+    def test_thread_exits_after_max_retries_exhausted(self):
+        """Thread must exit when max_retries is exhausted (not hang forever)."""
+        cfg = TCPClientConfig(
+            host="127.0.0.1",
+            port=9999,
+            reconnect=True,
+            max_retries=2,
+            reconnect_delay_sec=0.01,
+            connect_timeout_sec=0.1,
+        )
+        client = TCPClient(cfg)
+
+        with patch(
+            "core.tcp.client.socket.create_connection",
+            side_effect=ConnectionRefusedError("refused"),
+        ):
+            client.set_on(True)
+            client._thread.join(timeout=3.0)
+
+        assert not client._thread.is_alive(), "Thread should have exited after max_retries"
+
+    def test_on_disconnected_fires_after_max_retries_exhausted(self):
+        """on_disconnected callback fires once after retries exhausted (never connected)."""
+        disconnected = threading.Event()
+        callback_args = []
+
+        def on_disc(err):
+            callback_args.append(err)
+            disconnected.set()
+
+        cfg = TCPClientConfig(
+            host="127.0.0.1",
+            port=9999,
+            reconnect=True,
+            max_retries=2,
+            reconnect_delay_sec=0.01,
+            connect_timeout_sec=0.1,
+        )
+        client = TCPClient(cfg, on_disconnected=on_disc)
+
+        with patch(
+            "core.tcp.client.socket.create_connection",
+            side_effect=ConnectionRefusedError("refused"),
+        ):
+            client.set_on(True)
+            disconnected.wait(timeout=3.0)
+
+        assert len(callback_args) == 1, "on_disconnected should be called exactly once"
+        assert callback_args[0] is not None, "Exception argument should not be None"
+
+    def test_thread_exits_when_reconnect_false(self):
+        """Thread must exit immediately on first failure when reconnect=False."""
+        cfg = TCPClientConfig(
+            host="127.0.0.1",
+            port=9999,
+            reconnect=False,
+            connect_timeout_sec=0.1,
+        )
+        client = TCPClient(cfg)
+
+        with patch(
+            "core.tcp.client.socket.create_connection",
+            side_effect=ConnectionRefusedError("refused"),
+        ):
+            client.set_on(True)
+            client._thread.join(timeout=3.0)
+
+        assert not client._thread.is_alive(), "Thread should have exited (reconnect=False)"
