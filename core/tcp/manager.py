@@ -60,6 +60,8 @@ class TCPClientManager:
 
         if old_client:
             old_client.close()
+            if self._on_client_disconnected:
+                self._on_client_disconnected(client_ip, None)
 
         p = port or self.tcp_port
 
@@ -77,7 +79,7 @@ class TCPClientManager:
             # Guard: skip if a different client has replaced us for this IP
             with self._lock:
                 current = self._clients.get(client_ip)
-                if current is not None and current is not client:
+                if current is not client:
                     return
             self.logger.info(f"TCP connected to {client_ip}:{p}")
             if self._on_client_connected:
@@ -87,13 +89,17 @@ class TCPClientManager:
             # Guard: skip if a different client has replaced us for this IP
             with self._lock:
                 current = self._clients.get(client_ip)
-                if current is not None and current is not client:
+                if current is not client:
                     return
             self.logger.info(f"TCP disconnected from {client_ip}: {err}")
             if self._on_client_disconnected:
                 self._on_client_disconnected(client_ip, err)
 
         def on_line(line: str) -> None:
+            with self._lock:
+                current = self._clients.get(client_ip)
+                if current is not client:
+                    return
             if self._on_client_line:
                 self._on_client_line(client_ip, line)
 
@@ -117,6 +123,8 @@ class TCPClientManager:
         if client:
             client.close()
             self.logger.info(f"TCP client removed: {client_ip}")
+            if self._on_client_disconnected:
+                self._on_client_disconnected(client_ip, None)
 
     def _disconnect_client_unlocked(self, client_ip: str) -> Optional[TCPClient]:
         """Pop client from dicts. Caller must hold self._lock. Returns client for closing outside lock."""
@@ -132,6 +140,9 @@ class TCPClientManager:
         for client in clients:
             if client:
                 client.close()
+        if self._on_client_disconnected:
+            for ip in ips:
+                self._on_client_disconnected(ip, None)
         self.logger.info("All TCP clients disconnected")
 
     def send_to_client(self, client_ip: str, text: str) -> None:

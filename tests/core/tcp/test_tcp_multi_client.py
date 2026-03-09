@@ -776,10 +776,9 @@ class TestStaleCallbackAfterReconnect:
         last_status = ip_events[-1][1]
         # NOTE: This test documents the current behavior. If Bug 5 manifests,
         # the last event might be (ip, False) from the stale callback.
-        if not last_status:
-            pytest.xfail(
-                "Bug 5: stale on_disconnected callback fired after new connection. "
-                f"Event history: {ip_events}"
-            )
+        assert last_status, (
+            f"Bug 5 regression: stale on_disconnected corrupted status. "
+            f"Event history: {ip_events}"
+        )
 
         mgr.disconnect_all()

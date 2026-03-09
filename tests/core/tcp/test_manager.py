@@ -121,6 +121,59 @@ class TestBroadcastCmd:
             assert "10.0.0.1" in mgr._clients
 
 
+class TestStaleCallbackGuard:
+    def test_stale_on_disconnected_suppressed_when_client_removed(self):
+        """Old client's on_disconnected must be suppressed when IP removed from dict."""
+        mgr = TCPClientManager(tcp_port=9999, reconnect=False)
+        disconnected_calls = []
+        mgr._on_client_disconnected = lambda ip, err: disconnected_calls.append(ip)
+
+        with patch("core.tcp.client.socket.create_connection", side_effect=OSError("refused")):
+            mgr.connect_client("10.0.0.1")
+
+        with mgr._lock:
+            old_client = mgr._clients.get("10.0.0.1")
+
+        # Remove from dict (simulating _disconnect_client_unlocked during reconnect)
+        with mgr._lock:
+            mgr._clients.pop("10.0.0.1", None)
+            mgr._channels.pop("10.0.0.1", None)
+
+        # Simulate old client's thread firing on_disconnected
+        disconnected_calls.clear()
+        if old_client and old_client._on_disconnected:
+            old_client._on_disconnected(OSError("stale"))
+
+        assert len(disconnected_calls) == 0, (
+            f"Stale callback leaked through: {disconnected_calls}"
+        )
+
+    def test_on_line_suppressed_for_replaced_client(self):
+        """on_line from old client must be suppressed after IP is replaced."""
+        mgr = TCPClientManager(tcp_port=9999, reconnect=False)
+        received_lines = []
+        mgr._on_client_line = lambda ip, line: received_lines.append((ip, line))
+
+        with patch("core.tcp.client.socket.create_connection", side_effect=OSError("refused")):
+            mgr.connect_client("10.0.0.1")
+
+        with mgr._lock:
+            old_client = mgr._clients.get("10.0.0.1")
+
+        # Replace with new client
+        with patch("core.tcp.client.socket.create_connection", side_effect=OSError("refused")):
+            mgr.connect_client("10.0.0.1")
+
+        # Simulate old client delivering a line
+        received_lines.clear()
+        if old_client and old_client._on_line:
+            old_client._on_line("STALE LINE")
+
+        assert len(received_lines) == 0, (
+            f"Stale on_line callback leaked through: {received_lines}"
+        )
+
+
 class TestSendCmd:
     def test_send_cmd_returns_none_for_unknown_ip(self):
         mgr = TCPClientManager(tcp_port=9999, reconnect=False)
