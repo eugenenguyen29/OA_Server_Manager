@@ -186,7 +186,12 @@ class TCPClientManager:
             return {}
         with ThreadPoolExecutor(max_workers=len(snapshot)) as pool:
             futures = {ip: pool.submit(ch.send_cmd, cmd) for ip, ch in snapshot.items()}
-            results = {ip: fut.result() for ip, fut in futures.items()}
+            results: Dict[str, Optional[str]] = {}
+            for ip, fut in futures.items():
+                try:
+                    results[ip] = fut.result()
+                except Exception:
+                    results[ip] = None
         for ip, resp in results.items():
             if resp is None:
                 self.logger.warning(f"TCP client {ip} unresponsive to broadcast cmd")

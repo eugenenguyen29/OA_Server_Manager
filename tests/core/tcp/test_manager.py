@@ -174,6 +174,28 @@ class TestStaleCallbackGuard:
         )
 
 
+class TestBroadcastCmdExceptionHandling:
+    def test_broadcast_cmd_handles_exception_from_send_cmd(self):
+        """If send_cmd raises, broadcast_cmd should return None for that client."""
+        mgr = TCPClientManager(tcp_port=9999, reconnect=False)
+
+        ch_ok = MagicMock(spec=CommandChannel)
+        ch_ok.send_cmd.return_value = "OK"
+        ch_broken = MagicMock(spec=CommandChannel)
+        ch_broken.send_cmd.side_effect = RuntimeError("broken")
+
+        with mgr._lock:
+            mgr._clients["10.0.0.1"] = MagicMock(spec=TCPClient)
+            mgr._clients["10.0.0.2"] = MagicMock(spec=TCPClient)
+            mgr._channels["10.0.0.1"] = ch_ok
+            mgr._channels["10.0.0.2"] = ch_broken
+
+        results = mgr.broadcast_cmd("PING")
+
+        assert results["10.0.0.1"] == "OK"
+        assert results["10.0.0.2"] is None
+
+
 class TestSendCmd:
     def test_send_cmd_returns_none_for_unknown_ip(self):
         mgr = TCPClientManager(tcp_port=9999, reconnect=False)
